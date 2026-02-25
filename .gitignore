@@ -40,3 +40,9 @@ htmlcov/
 
 # Challenge source doc (keep .md, ignore .docx binary)
 *.docx
+
+# Implementation guide (local reference only, not committed)
+IMPLEMENTATION_GUIDE.md
+
+# Old markdown final report (replaced by .tex)
+reports/final_report.md

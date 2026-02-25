@@ -78,23 +78,31 @@ def _has_security_violation(evidences: Dict[str, List[Evidence]]) -> bool:
     - os.system usage
     - Shell injection risks
     - Unsanitized subprocess calls
+
+    Note: For safe_tool_engineering evidence, found=True means SAFE
+    (no violation detected), found=False means the safety check FAILED,
+    i.e. a real violation exists.  We only trigger on found=False evidence
+    OR evidence whose content explicitly starts with "SECURITY VIOLATION".
     """
     security_evs = evidences.get("safe_tool_engineering", [])
     for ev in security_evs:
-        if ev.found and ev.content:
-            content_lower = ev.content.lower()
-            # Check for explicit security violations
-            if any(
-                marker in content_lower
-                for marker in [
-                    "os.system",
-                    "shell=true",
-                    "shell injection",
-                    "security violation",
-                    "unsanitized",
-                ]
-            ):
-                return True
+        if not ev.content:
+            continue
+        content_lower = ev.content.lower()
+        # Explicit violation banner always triggers
+        if content_lower.startswith("security violation"):
+            return True
+        # found=False means the safety check failed → a real vulnerability
+        if not ev.found and any(
+            marker in content_lower
+            for marker in [
+                "os.system",
+                "shell=true",
+                "shell injection",
+                "unsanitized",
+            ]
+        ):
+            return True
     return False
 
 

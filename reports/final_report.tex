@@ -1,0 +1,577 @@
+% ============================================================
+%  Swarm Auditor – Final Report
+%  Author: Birkity Yishak
+%  Date:   February 28, 2026
+%  Course: 10 Academy — FDE Challenge Week 2
+% ============================================================
+
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{float}
+
+% ── Colours ─────────────────────────────────────────────────
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codered}{rgb}{0.7,0,0}
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{linkblue}{rgb}{0.04,0.28,0.56}
+
+% ── Hyperlink style ─────────────────────────────────────────
+\hypersetup{
+    colorlinks=true,
+    linkcolor=linkblue,
+    urlcolor=linkblue,
+    citecolor=linkblue,
+}
+
+% ── Listings style ──────────────────────────────────────────
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    keywordstyle=\color{codered}\bfseries,
+    commentstyle=\color{codegreen},
+    frame=single,
+    breaklines=true,
+    columns=flexible,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    xleftmargin=1.5em,
+}
+
+% ── Header / Footer ────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Swarm Auditor — Final Report}
+\fancyhead[R]{\small Birkity Yishak}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Title ───────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    \textbf{Swarm Auditor — Final Report}\\[0.3cm]
+    \large FDE Challenge Week 2: The Automaton Auditor\\[0.2cm]
+    \normalsize 10 Academy
+}
+\author{
+    Birkity Yishak\\
+    \small \url{https://github.com/Birkity/automaton-auditor-fde-week2}\\
+    \small Branch: \texttt{phase2\_final}
+}
+\date{February 25, 2026}
+
+% ============================================================
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+% ────────────────────────────────────────────────────────────
+\section{Executive Summary}
+% ────────────────────────────────────────────────────────────
+
+The \textbf{Swarm Auditor} is a deep LangGraph agent that audits Week~2 submissions
+using a multi-layered ``Digital Courtroom'' architecture.  It evaluates code
+repositories and PDF reports against a 10-dimension forensic rubric, producing
+structured Markdown audit reports with per-criterion scores, judicial arguments,
+dissent explanations, and remediation plans.
+
+\begin{table}[H]
+\centering
+\caption{Key Metrics}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Graph Nodes            & 12 (including error handlers) \\
+Conditional Edges      & 2 (\texttt{add\_conditional\_edges()}) \\
+Parallel Fan-Out Layers & 2 (Detectives + Judges) \\
+Rubric Dimensions      & 10 \\
+Test Count             & 195 across 9 test files \\
+Self-Audit Score       & 3.9\,/\,5.0 \\
+LangSmith Tracing      & Enabled \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Self-Audit Score Summary}
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Dimension} & \textbf{Score} \\
+\midrule
+State Management Rigor           & 5/5 \\
+Graph Orchestration Architecture & 5/5 \\
+Safe Tool Engineering            & 5/5 \\
+Git Forensic Analysis            & 4/5 \\
+Structured Output Enforcement    & 4/5 \\
+Chief Justice Synthesis Engine   & 4/5 \\
+Report Accuracy (Cross-Ref.)     & 4/5 \\
+Judicial Nuance and Dialectics   & 3/5 \\
+Theoretical Depth (Documentation)& 3/5 \\
+Architectural Diagram Analysis   & 2/5 \\
+\midrule
+\textbf{Overall}                 & \textbf{3.9\,/\,5.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ────────────────────────────────────────────────────────────
+\section{Architecture Deep Dive}
+% ────────────────────────────────────────────────────────────
+
+\subsection{System Overview}
+
+The Swarm Auditor implements a three-layer pipeline modelled as a LangGraph
+\texttt{StateGraph} with 12 real nodes and 2 conditional edges:
+
+\begin{lstlisting}[language={},title={Pipeline Flow}]
+START
+  -> context_builder
+  -> [RepoInvestigator || DocAnalyst || VisionInspector]  (Detective Fan-Out)
+  -> evidence_aggregator                                   (Fan-In)
+  -> (conditional: has_evidence?)
+      YES -> judge_dispatcher
+             -> [Prosecutor || Defense || TechLead]        (Judicial Fan-Out)
+             -> chief_justice                               (Synthesis)
+             -> (conditional: report_valid?)
+                 YES -> END
+                 NO  -> report_fallback -> END
+      NO  -> no_evidence_handler -> END
+\end{lstlisting}
+
+\subsection{Dialectical Synthesis}
+
+The judicial layer implements \textbf{dialectical synthesis}---a reasoning pattern
+where three adversarial personas analyse the same evidence from fundamentally
+different philosophical positions:
+
+\begin{description}[leftmargin=1.5cm,style=nextline]
+    \item[Prosecutor (\textit{adversarial})]
+        Assumes guilt.  Actively searches for missing features, security flaws,
+        and lazy implementations.  Weighted $0.35$ in default scoring, $0.50$
+        for architecture dimensions.
+
+    \item[Defense (\textit{forgiving})]
+        Assumes good faith.  Rewards creative effort, interprets partial
+        implementations charitably, and highlights what works.  Weighted $0.25$.
+
+    \item[Tech Lead (\textit{pragmatic})]
+        Evaluates production-readiness.  Focuses on maintainability, modularity,
+        error handling, and deployment concerns.  Weighted $0.40$ by default, $0.30$
+        for architecture.
+\end{description}
+
+Each judge receives the \emph{same} evidence bundle and produces a
+\texttt{JudicialOpinion} Pydantic object via \texttt{.with\_structured\_output()}.
+The Chief Justice then applies deterministic Python rules to resolve
+conflicts---never averaging, never invoking an LLM.
+
+The dialectical approach prevents single-perspective bias: a project that
+looks impressive to the Defense may harbour critical security flaws
+the Prosecutor catches, while the Tech Lead grounds both in practical concerns.
+
+\subsection{Fan-In / Fan-Out Architecture}
+
+The graph implements \textbf{two distinct parallel fan-out / fan-in patterns}:
+
+\paragraph{Layer~1 --- Detective Fan-Out.}
+\texttt{context\_builder} fans out to three detective nodes
+(\texttt{repo\_investigator}, \texttt{doc\_analyst}, \texttt{vision\_inspector}).
+All three run concurrently via LangGraph's parallel edge execution.  Each
+returns \texttt{\{dimension\_id: [Evidence]\}} dicts that merge into
+\texttt{AgentState["evidences"]} using the \texttt{operator.ior} reducer (dict
+merge without overwrite).
+
+\paragraph{The Parallel State Challenge.}
+Since detectives run in parallel, \texttt{doc\_analyst} cannot see
+\texttt{repo\_investigator}'s file list during execution.  The
+\texttt{evidence\_aggregator} solves this: after fan-in merges all evidence, it
+re-runs the \texttt{report\_accuracy} cross-reference with the actual repo file
+list.  Without this post-processing step, all file paths would be falsely
+flagged as ``hallucinated.''
+
+\paragraph{Layer~2 --- Judicial Fan-Out.}
+\texttt{judge\_dispatcher} (a pass-through node required by LangGraph's
+one-conditional-per-source constraint) fans out to three judge nodes.  Their
+outputs merge into \texttt{AgentState["opinions"]} via \texttt{operator.add}
+(list concatenation).  \texttt{chief\_justice} aggregates all 30 opinions
+and synthesises a final \texttt{AuditReport}.
+
+\subsection{Metacognition}
+
+The system exhibits \textbf{metacognition}---awareness and reasoning about
+its own reasoning processes---in three ways:
+
+\begin{enumerate}
+    \item \textbf{Self-Auditing Capability.}
+        The auditor can audit \emph{itself}.  Running it against its own
+        repository produced a structured critique (initial score 3.4/5.0) that
+        directly led to two bug fixes, raising the score to 3.9/5.0.
+
+    \item \textbf{Dissent Tracking.}
+        The Chief Justice tracks \emph{where} judges disagree and \emph{why}.
+        Any dimension with score variance $> 2$ triggers a
+        \texttt{dissent\_summary} explaining the philosophical conflict.
+        This is meta-reasoning about the quality of the reasoning itself.
+
+    \item \textbf{Evidence-Aware Routing.}
+        \texttt{route\_after\_evidence()} inspects evidence results and decides
+        whether to proceed to judges or abort.
+        \texttt{route\_after\_chief\_justice()} inspects report quality.
+        The system reasons about whether its own outputs are trustworthy.
+\end{enumerate}
+
+\subsection{State Synchronisation}
+
+\textbf{State synchronisation} ensures safe concurrent updates when parallel
+nodes write to shared state:
+
+\begin{itemize}
+    \item \texttt{evidences: Annotated[Dict[str, List[Evidence]], operator.ior]}
+        --- parallel detective outputs merge via dict union.
+    \item \texttt{opinions: Annotated[List[JudicialOpinion], operator.add]}
+        --- parallel judge outputs append to a shared list.
+\end{itemize}
+
+\textbf{Why \texttt{operator.ior}?}  Each detective writes to different
+dimension keys.  The \texttt{ior} operator combines them without overwriting,
+ensuring no evidence is lost.
+
+\textbf{Why \texttt{operator.add}?}  Each judge produces 10 opinions.
+The \texttt{add} operator collects all 30 into a single list for the Chief
+Justice.
+
+Without these reducers, parallel execution would cause
+\emph{last-writer-wins} data loss---a common LangGraph pitfall.
+
+% ────────────────────────────────────────────────────────────
+\section{Architectural Diagrams}
+% ────────────────────────────────────────────────────────────
+
+\subsection{StateGraph Flow}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.8cm,
+    every node/.style={font=\small},
+    box/.style={draw, rounded corners, minimum width=2.4cm, minimum height=0.7cm, fill=codebg},
+    startend/.style={draw, rounded corners=0.3cm, fill=green!10, minimum width=1.8cm},
+    cond/.style={draw, diamond, aspect=2.2, fill=yellow!10, inner sep=1pt, font=\scriptsize},
+    arr/.style={->, >=stealth, thick},
+    dash/.style={->, >=stealth, thick, dashed, color=codered},
+]
+    % START
+    \node[startend] (start) {START};
+    \node[box, below=of start] (cb) {context\_builder};
+
+    % Detectives (fan-out)
+    \node[box, below left=1.0cm and 2.2cm of cb] (ri) {RepoInvestigator};
+    \node[box, below=1.0cm of cb] (da) {DocAnalyst};
+    \node[box, below right=1.0cm and 2.2cm of cb] (vi) {VisionInspector};
+
+    % Fan-in
+    \node[box, below=2.8cm of cb] (ea) {evidence\_aggregator};
+
+    % Conditional 1
+    \node[cond, below=0.7cm of ea] (c1) {evidence?};
+
+    % Error path
+    \node[box, below right=0.8cm and 2.8cm of c1, fill=red!8] (neh) {no\_evidence\_handler};
+
+    % Judge dispatcher
+    \node[box, below left=0.8cm and 0.0cm of c1] (jd) {judge\_dispatcher};
+
+    % Judges (fan-out)
+    \node[box, below left=1.0cm and 2.2cm of jd] (pr) {Prosecutor};
+    \node[box, below=1.0cm of jd] (df) {Defense};
+    \node[box, below right=1.0cm and 2.2cm of jd] (tl) {TechLead};
+
+    % Chief Justice
+    \node[box, below=2.8cm of jd] (cj) {ChiefJustice};
+
+    % Conditional 2
+    \node[cond, below=0.7cm of cj] (c2) {valid?};
+
+    % Fallback
+    \node[box, below right=0.8cm and 2.8cm of c2, fill=red!8] (rf) {report\_fallback};
+
+    % END
+    \node[startend, below=2.0cm of c2] (end) {END};
+
+    % Edges - top
+    \draw[arr] (start) -- (cb);
+    \draw[arr] (cb) -- (ri);
+    \draw[arr] (cb) -- (da);
+    \draw[arr] (cb) -- (vi);
+    \draw[arr] (ri) -- (ea);
+    \draw[arr] (da) -- (ea);
+    \draw[arr] (vi) -- (ea);
+
+    % Conditional 1
+    \draw[arr] (ea) -- (c1);
+    \draw[dash] (c1) -- node[left, font=\scriptsize]{yes} (jd);
+    \draw[dash] (c1) -- node[above, font=\scriptsize]{no} (neh);
+    \draw[arr] (neh) |- (end);
+
+    % Judges
+    \draw[arr] (jd) -- (pr);
+    \draw[arr] (jd) -- (df);
+    \draw[arr] (jd) -- (tl);
+    \draw[arr] (pr) -- (cj);
+    \draw[arr] (df) -- (cj);
+    \draw[arr] (tl) -- (cj);
+
+    % Conditional 2
+    \draw[arr] (cj) -- (c2);
+    \draw[dash] (c2) -- node[left, font=\scriptsize]{yes} (end);
+    \draw[dash] (c2) -- node[above, font=\scriptsize]{no} (rf);
+    \draw[arr] (rf) |- (end);
+\end{tikzpicture}
+\caption{Complete StateGraph flow with conditional edges (dashed = conditional).}
+\label{fig:stategraph}
+\end{figure}
+
+\subsection{Data Flow Summary}
+
+\begin{lstlisting}[language={},title={Data Flow}]
+Input: repo_url + pdf_path
+         |
+    context_builder (loads rubric.json -> 10 RubricDimension objects)
+         |
+    +----+----------------+
+    v    v                v
+  Repo  Doc            Vision
+  Inv.  Analyst        Inspector
+    |    |                |
+    +----+----+-----------+
+              v
+  evidence_aggregator (post-process cross-refs)
+         |
+    +----+----+
+    v    v    v
+  Pros. Def. TechLead    (LLM judges)
+    +----+----+
+         v
+   chief_justice          (deterministic rules)
+         |
+         v
+   AuditReport -> Markdown
+\end{lstlisting}
+
+% ────────────────────────────────────────────────────────────
+\section{Criterion-by-Criterion Self-Audit Breakdown}
+% ────────────────────────────────────────────────────────────
+
+\subsection{State Management Rigor --- 5/5 \checkmark}
+
+\textbf{All three judges agreed:} The \texttt{AgentState} \texttt{TypedDict}
+with \texttt{Annotated} reducers correctly prevents parallel data overwrites.
+Five Pydantic \texttt{BaseModel} classes enforce type safety at every state
+boundary.  \emph{No remediation needed.}
+
+\subsection{Graph Orchestration Architecture --- 5/5 \checkmark}
+
+\textbf{Unanimous:} The 12-node StateGraph with two fan-out/fan-in layers
+and two conditional edges exceeds rubric requirements.  Includes
+\texttt{no\_evidence\_handler} and \texttt{report\_fallback} error paths.
+\emph{No remediation needed.}
+
+\subsection{Safe Tool Engineering --- 5/5 \checkmark}
+
+All judges scored 5/5.  Uses \texttt{tempfile.TemporaryDirectory()} for
+sandboxing, \texttt{subprocess.run} instead of \texttt{os.system()}, with
+comprehensive error handling and timeouts.
+
+\textit{Note:} Initially scored 3/5 due to a false-positive security cap
+(see Section~\ref{sec:bugfixes}).  Fixed in the same session.
+
+\subsection{Git Forensic Analysis --- 4/5}
+
+\textbf{Consensus (P:4, D:5, TL:4):} 11 commits with clear progression.
+Average inter-commit time 8259\,s ($\approx$2.3\,h).  Deduction: some commit
+messages (``updates'', ``minor updates'') lack specificity.
+
+\textbf{Remediation:} Adopt conventional commits (\texttt{feat:}, \texttt{fix:}).
+
+\subsection{Structured Output Enforcement --- 4/5}
+
+Judges confirmed \texttt{.with\_structured\_output()} usage bound to
+\texttt{JudicialOpinion}.  Retry logic handles malformed responses.
+Prosecutor wanted more explicit code snippets in evidence.
+
+\textbf{Remediation:} Extract \texttt{.with\_structured\_output()} call sites
+as evidence content in \texttt{repo\_tools.py}.
+
+\subsection{Chief Justice Synthesis Engine --- 4/5}
+
+Deterministic Python rules (security override, variance check, dissent
+requirement) work correctly.  Output format could better enforce full
+Markdown structure with explicit section headers.
+
+\subsection{Report Accuracy (Cross-Reference) --- 4/5}
+
+Initially scored 2/5 due to the parallel race condition (see
+Section~\ref{sec:bugfixes}).  After the fix: 5 paths verified, 0 hallucinated.
+
+\subsection{Judicial Nuance and Dialectics --- 3/5}
+
+Judges want to see prompt content in evidence (not just persona existence).
+\textbf{Remediation:} Add forensic protocol extracting and comparing
+system prompts ($<50\%$ overlap check).
+
+\subsection{Theoretical Depth (Documentation) --- 3/5}
+
+Missing ``Metacognition'' and ``State Synchronisation'' in the interim report.
+\textbf{Remediation:} Addressed in this final report (Section~2).
+
+\subsection{Architectural Diagram Analysis --- 2/5}
+
+No images in the interim PDF.  VisionInspector had nothing to analyse.
+\textbf{Remediation:} This final report includes TikZ diagrams (Figure~\ref{fig:stategraph}).
+
+% ────────────────────────────────────────────────────────────
+\section{MinMax Feedback Loop Reflection}
+% ────────────────────────────────────────────────────────────
+
+\subsection{What the Self-Audit Caught}
+\label{sec:bugfixes}
+
+Running the auditor against itself revealed two critical bugs:
+
+\begin{enumerate}
+    \item \textbf{Security Cap False Positive.}
+        \texttt{\_has\_security\_violation()} used \texttt{ev.found=True}
+        (which means SAFE) to trigger on evidence containing ``os.system''
+        as a substring---even in ``No os.system() calls detected.''
+        This caused Safe Tool Engineering to be capped at 3/5 despite
+        all judges scoring 5/5.
+
+        \textbf{Fix:} Changed to trigger only on \texttt{found=False}
+        evidence (actual violations) or content starting with
+        \texttt{"SECURITY VIOLATION"}.
+
+    \item \textbf{Parallel Fan-Out Race Condition.}
+        \texttt{doc\_analyst} tried to cross-reference file paths against
+        the repo file list during parallel execution, but
+        \texttt{repo\_investigator} hadn't finished yet.  Result: 100\%
+        false-positive hallucination detection.
+
+        \textbf{Fix:} \texttt{evidence\_aggregator} now re-runs the
+        cross-reference after all detectives have merged their outputs.
+\end{enumerate}
+
+\subsection{How the Agent Was Updated}
+
+\begin{itemize}
+    \item Fixed \texttt{\_has\_security\_violation()} logic
+    \item Added post-processing in \texttt{evidence\_aggregator}
+    \item Added 1 new test, updated 5 existing tests
+    \item Total: \textbf{195 tests} (up from 194), all passing
+    \item Self-audit score: \textbf{3.4 $\rightarrow$ 3.9 / 5.0}
+\end{itemize}
+
+\subsection{Peer Audit Reflection}
+
+\textit{(To be completed after peer assignment and exchange.)}
+
+% ────────────────────────────────────────────────────────────
+\section{Remediation Plan}
+% ────────────────────────────────────────────────────────────
+
+\begin{table}[H]
+\centering
+\caption{Remediation Plan for Remaining Gaps}
+\begin{tabular}{@{}cllccl@{}}
+\toprule
+\textbf{Prio} & \textbf{Dimension} & \textbf{Before} & \textbf{After} & \textbf{Target} & \textbf{Action} \\
+\midrule
+P0 & Report Accuracy     & 2/5 & 4/5 & 4/5 & \checkmark\,Fixed race condition \\
+P0 & Safe Tool Eng.      & 3/5 & 5/5 & 5/5 & \checkmark\,Fixed false positive \\
+P1 & Structured Output   & 3/5 & 4/5 & 4/5 & Extract code snippets as evidence \\
+P1 & Judicial Nuance     & 3/5 & 3/5 & 4/5 & Prompt overlap analysis protocol \\
+P1 & Diagram Analysis    & 2/5 & 2/5 & 3/5 & Embed diagrams in PDF reports \\
+P2 & Theoretical Depth   & 3/5 & 3/5 & 4/5 & \checkmark\,Addressed in final report \\
+P2 & Commit Messages     & 4/5 & 4/5 & 5/5 & Conventional commits format \\
+P3 & CJ Output Format    & 4/5 & 4/5 & 5/5 & Enhanced Markdown template \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ────────────────────────────────────────────────────────────
+\section{Design Decisions}
+% ────────────────────────────────────────────────────────────
+
+\subsection{Why Pydantic over Dicts?}
+
+Raw dicts provide no guarantees about key presence, value types, or field
+constraints.  Pydantic \texttt{BaseModel} subclasses enforce runtime
+validation (a score must be 1--5), IDE autocompletion, and clean
+serialisation via \texttt{.model\_validate()} / \texttt{.model\_dump()}.
+The \texttt{AgentState} itself is a \texttt{TypedDict} because LangGraph
+requires \texttt{TypedDict} for state definitions with \texttt{Annotated}
+reducers.
+
+\subsection{Why AST over Regex for Code Analysis?}
+
+Python's \texttt{ast} module produces a structured syntax tree that allows
+detecting \texttt{os.system()} calls by finding \texttt{ast.Call} nodes with
+\texttt{ast.Attribute.attr == "system"}---no false positives from comments
+or string literals.  Regex-based analysis would fail on multi-line calls
+and other edge cases.
+
+\subsection{Why Deterministic Chief Justice?}
+
+The rubric requires ``hardcoded deterministic conflict resolution rules.''
+Using an LLM would introduce non-deterministic scoring, risk the LLM
+ignoring security overrides, add latency and cost, and make the system
+harder to audit.  The Chief Justice applies 5 rules in fixed order:
+Security Override $\rightarrow$ Fact Supremacy $\rightarrow$ Functionality
+Weight $\rightarrow$ Variance Re-evaluation $\rightarrow$ Dissent
+Requirement.
+
+% ────────────────────────────────────────────────────────────
+\section{Technology Stack}
+% ────────────────────────────────────────────────────────────
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Component} & \textbf{Technology} & \textbf{Version} \\
+\midrule
+Runtime             & Python              & 3.13.7 \\
+Package Manager     & uv                  & 0.10.0 \\
+Graph Framework     & LangGraph           & 1.0.9 \\
+LLM Integration     & langchain-ollama    & 1.0.1 \\
+Schema Validation   & Pydantic            & 2.12.5 \\
+PDF Parsing         & PyMuPDF (fitz)      & 1.27.1 \\
+Frontend            & Streamlit           & 1.54.0 \\
+Observability       & LangSmith           & Enabled \\
+LLM Models          & Ollama              & qwen3, deepseek-v3.1, llava \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\vfill
+\begin{center}
+\small\textit{Swarm Auditor v0.3.0 --- Built with LangGraph + Streamlit --- 10 Academy FDE Week 2}
+\end{center}
+
+\end{document}
