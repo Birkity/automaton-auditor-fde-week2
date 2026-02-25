@@ -34,7 +34,7 @@ START
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/Birkity/automaton-auditor-fde-week2
 cd swarm-auditor
 
 # Install dependencies with uv
@@ -79,13 +79,17 @@ swarm-auditor/
 │   │   └── vision_tools.py   # Image extraction (placeholder)
 │   └── nodes/
 │       ├── detectives.py     # RepoInvestigator, DocAnalyst, VisionInspector
-│       ├── judges.py         # Prosecutor, Defense, TechLead (Phase 2)
-│       └── justice.py        # ChiefJustice synthesis engine (Phase 2)
+│       ├── judges.py         # Prosecutor, Defense, TechLead (LLM judges)
+│       └── chief_justice.py  # ChiefJustice deterministic synthesis engine
 ├── tests/
-│   ├── test_state.py         # State model tests
-│   ├── test_repo_tools.py    # Repo tool tests
-│   ├── test_doc_tools.py     # Doc tool tests
-│   └── test_graph.py         # Graph compilation + integration tests
+│   ├── test_state.py         # State model tests (17)
+│   ├── test_repo_tools.py    # Repo tool tests (25)
+│   ├── test_doc_tools.py     # Doc tool tests (21)
+│   ├── test_detectives.py    # Detective node tests (24)
+│   ├── test_graph.py         # Graph topology tests (20)
+│   ├── test_prompts.py       # Prompt persona tests (14)
+│   ├── test_judges.py        # Judge node tests (13)
+│   └── test_chief_justice.py # Chief Justice logic tests (31)
 ├── audit/
 │   ├── report_onself_generated/   # Self-audit output
 │   ├── report_onpeer_generated/   # Peer audit output
@@ -111,6 +115,4 @@ uv run streamlit run app.py
 4. **Deep AST Parsing**: Code analysis uses Python's `ast` module — no regex.
 5. **Dialectical Synthesis**: Three adversarial judge personas with deterministic conflict resolution rules, not LLM averaging.
 
-## License
 
-MIT

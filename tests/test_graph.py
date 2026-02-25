@@ -125,19 +125,23 @@ class TestGraphTopology:
         expected = [
             "__end__",
             "__start__",
+            "chief_justice",
             "context_builder",
+            "defense",
             "doc_analyst",
             "evidence_aggregator",
+            "prosecutor",
             "repo_investigator",
+            "tech_lead",
             "vision_inspector",
         ]
         assert node_names == expected
 
-    def test_has_five_real_nodes(self, compiled_graph):
-        """5 real nodes: context_builder, 3 detectives, evidence_aggregator."""
+    def test_has_nine_real_nodes(self, compiled_graph):
+        """9 real nodes: context_builder, 3 detectives, aggregator, 3 judges, chief_justice."""
         graph_view = compiled_graph.get_graph()
         real_nodes = [n for n in graph_view.nodes if not n.startswith("__")]
-        assert len(real_nodes) == 5
+        assert len(real_nodes) == 9
 
     def test_fan_out_edges_from_context_builder(self, compiled_graph):
         """context_builder should have 3 outgoing edges to detectives."""
@@ -157,14 +161,33 @@ class TestGraphTopology:
         mermaid = compiled_graph.get_graph().draw_mermaid()
         assert "__start__ --> context_builder" in mermaid
 
-    def test_evidence_aggregator_to_end(self, compiled_graph):
+    def test_l2_fan_out_from_evidence_aggregator(self, compiled_graph):
+        """evidence_aggregator should fan out to 3 judges."""
         mermaid = compiled_graph.get_graph().draw_mermaid()
-        assert "evidence_aggregator --> __end__" in mermaid
+        assert "evidence_aggregator --> prosecutor" in mermaid
+        assert "evidence_aggregator --> defense" in mermaid
+        assert "evidence_aggregator --> tech_lead" in mermaid
+
+    def test_l2_fan_in_to_chief_justice(self, compiled_graph):
+        """3 judges should fan in to chief_justice."""
+        mermaid = compiled_graph.get_graph().draw_mermaid()
+        assert "prosecutor --> chief_justice" in mermaid
+        assert "defense --> chief_justice" in mermaid
+        assert "tech_lead --> chief_justice" in mermaid
+
+    def test_chief_justice_to_end(self, compiled_graph):
+        mermaid = compiled_graph.get_graph().draw_mermaid()
+        assert "chief_justice --> __end__" in mermaid
 
     def test_no_direct_context_builder_to_aggregator(self, compiled_graph):
         """There should be NO direct edge from context_builder to evidence_aggregator."""
         mermaid = compiled_graph.get_graph().draw_mermaid()
         assert "context_builder --> evidence_aggregator" not in mermaid
+
+    def test_no_direct_aggregator_to_chief_justice(self, compiled_graph):
+        """evidence_aggregator should not directly connect to chief_justice."""
+        mermaid = compiled_graph.get_graph().draw_mermaid()
+        assert "evidence_aggregator --> chief_justice" not in mermaid
 
     def test_mermaid_output_is_valid(self, compiled_graph):
         """Mermaid output should contain graph TD declaration."""
