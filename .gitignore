@@ -1,2 +1,42 @@
+# Virtual environments
 .venv/
 venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cloned repos (sandboxed tmp dirs, but just in case)
+cloned_repos/
+
+# Byte-compiled
+*.pyc
+
+# uv
+.uv/
+
+# Test / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Challenge source doc (keep .md, ignore .docx binary)
+*.docx
