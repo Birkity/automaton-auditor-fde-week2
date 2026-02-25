@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.git/
+*.pyc
+.env
+tests/
+reports/
+audit/
+*.pdf
+.python-version
