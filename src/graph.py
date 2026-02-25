@@ -29,7 +29,7 @@ load_dotenv()
 
 from src.nodes.detectives import doc_analyst, repo_investigator, vision_inspector
 from src.nodes.judges import defense, prosecutor, tech_lead
-from src.nodes.chief_justice import chief_justice as chief_justice_node
+from src.nodes.justice import chief_justice as chief_justice_node
 from src.state import AgentState, AuditReport, CriterionResult, Evidence, RubricDimension
 
 

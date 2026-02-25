@@ -1,5 +1,5 @@
 """
-Tests for src/nodes/chief_justice.py — Deterministic conflict resolution.
+Tests for src/nodes/justice.py — Deterministic conflict resolution.
 
 NO mocking needed — the Chief Justice is pure Python logic.
 Tests verify all 5 synthesis rules from rubric.json.
@@ -11,7 +11,7 @@ from typing import Dict, List
 
 import pytest
 
-from src.nodes.chief_justice import (
+from src.nodes.justice import (
     SECURITY_CAP,
     VARIANCE_THRESHOLD,
     _build_audit_report,

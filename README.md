@@ -89,7 +89,7 @@ swarm-auditor/
 │   └── nodes/
 │       ├── detectives.py     # RepoInvestigator, DocAnalyst, VisionInspector
 │       ├── judges.py         # Prosecutor, Defense, TechLead (LLM judges)
-│       └── chief_justice.py  # ChiefJustice deterministic synthesis engine
+│       └── justice.py         # ChiefJustice deterministic synthesis engine
 ├── tests/
 │   ├── test_state.py         # State model tests (17)
 │   ├── test_repo_tools.py    # Repo tool tests (25)
@@ -98,7 +98,7 @@ swarm-auditor/
 │   ├── test_graph.py         # Graph topology + conditional edge tests (28)
 │   ├── test_prompts.py       # Prompt persona tests (14)
 │   ├── test_judges.py        # Judge node tests (13)
-│   ├── test_chief_justice.py # Chief Justice logic tests (31)
+│   ├── test_justice.py       # Chief Justice logic tests (31)
 │   └── test_vision_tools.py  # Vision multimodal analysis tests (14)
 ├── audit/
 │   ├── report_onself_generated/   # Self-audit output
