@@ -14,7 +14,7 @@ from pathlib import Path
 import streamlit as st
 
 from src.graph import compile_graph, load_rubric_dimensions
-from src.state import Evidence
+from src.state import Evidence, JudicialOpinion
 
 # ── Page Configuration ──────────────────────────────────────────────
 
@@ -150,9 +150,12 @@ if run_audit and repo_url:
 
     pdf_path = _save_uploaded_pdf(pdf_file)
 
+    # Set model env var for judge nodes
+    os.environ["OLLAMA_MODEL"] = model_choice
+
     try:
-        with st.status("🔍 Running Detective Layer...", expanded=True) as status:
-            st.write("Compiling LangGraph StateGraph...")
+        with st.status("⚖️ Running Full Audit Pipeline...", expanded=True) as status:
+            st.write("Compiling LangGraph StateGraph (9 nodes, 2 fan-out/fan-in layers)...")
             graph = compile_graph()
 
             st.write("Loading rubric dimensions (10 dimensions, v3.0.0)...")
@@ -165,10 +168,13 @@ if run_audit and repo_url:
                 "final_report": None,
             }
 
-            st.write("Executing parallel fan-out: RepoInvestigator ‖ DocAnalyst ‖ VisionInspector...")
+            st.write("**Layer 1:** Detectives fan-out — RepoInvestigator ‖ DocAnalyst ‖ VisionInspector...")
+            st.write("**Layer 2:** Judges fan-out — Prosecutor ‖ Defense ‖ TechLead...")
+            st.write("**Layer 3:** Chief Justice — deterministic conflict resolution...")
+
             result = graph.invoke(initial_state)
 
-            status.update(label="✅ Detective Layer Complete", state="complete")
+            status.update(label="✅ Full Pipeline Complete", state="complete")
             st.session_state.audit_result = result
 
     except Exception as e:
@@ -194,9 +200,10 @@ with tab_progress:
     elif st.session_state.audit_result:
         result = st.session_state.audit_result
         evidences = result.get("evidences", {})
-        dims = result.get("rubric_dimensions", [])
+        opinions = result.get("opinions", [])
+        final_report = result.get("final_report")
 
-        st.subheader("✅ Detective Layer Complete")
+        st.subheader("✅ Full Pipeline Complete" if final_report else "✅ Detective Layer Complete")
 
         # Summary metrics
         total_evidence = sum(len(v) for k, v in evidences.items() if not k.startswith("_"))
@@ -205,11 +212,16 @@ with tab_progress:
             for ev in v if ev.found
         )
         dim_count = len([k for k in evidences if not k.startswith("_")])
+        opinion_count = len(opinions)
 
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Dimensions Analyzed", dim_count)
-        col_m2.metric("Evidence Collected", total_evidence)
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("Dimensions", dim_count)
+        col_m2.metric("Evidence", total_evidence)
         col_m3.metric("Positive Findings", found_count)
+        col_m4.metric("Judicial Opinions", opinion_count)
+
+        if final_report:
+            st.metric("Overall Score", f"{final_report.overall_score:.1f} / 5.0")
 
         st.divider()
 
@@ -251,26 +263,56 @@ with tab_progress:
         st.markdown("### ⬇️ Evidence Aggregator")
         st.progress(1.0, text="All evidence merged")
 
-        # Judicial Layer (Phase 2)
-        st.markdown("### Layer 2: Judicial Layer (Phase 2)")
+        # Judicial Layer
+        st.markdown("### Layer 2: Judicial Layer")
         col4, col5, col6 = st.columns(3)
+
+        # Count opinions per judge
+        prosecutor_ops = [o for o in opinions if o.judge == "Prosecutor"]
+        defense_ops = [o for o in opinions if o.judge == "Defense"]
+        tech_lead_ops = [o for o in opinions if o.judge == "TechLead"]
+
+        judge_done = opinion_count > 0
+
         with col4:
             with st.container(border=True):
                 st.markdown("⚔️ **Prosecutor**")
-                st.progress(0, text="Phase 2")
+                st.caption("Adversarial lens • Trust no one")
+                if prosecutor_ops:
+                    avg = sum(o.score for o in prosecutor_ops) / len(prosecutor_ops)
+                    st.progress(1.0, text=f"Done — {len(prosecutor_ops)} opinions (avg {avg:.1f})")
+                else:
+                    st.progress(0, text="Waiting...")
+
         with col5:
             with st.container(border=True):
                 st.markdown("🛡️ **Defense Attorney**")
-                st.progress(0, text="Phase 2")
+                st.caption("Optimistic lens • Reward effort")
+                if defense_ops:
+                    avg = sum(o.score for o in defense_ops) / len(defense_ops)
+                    st.progress(1.0, text=f"Done — {len(defense_ops)} opinions (avg {avg:.1f})")
+                else:
+                    st.progress(0, text="Waiting...")
+
         with col6:
             with st.container(border=True):
                 st.markdown("🔧 **Tech Lead**")
-                st.progress(0, text="Phase 2")
+                st.caption("Pragmatic lens • Does it work?")
+                if tech_lead_ops:
+                    avg = sum(o.score for o in tech_lead_ops) / len(tech_lead_ops)
+                    st.progress(1.0, text=f"Done — {len(tech_lead_ops)} opinions (avg {avg:.1f})")
+                else:
+                    st.progress(0, text="Waiting...")
 
-        st.markdown("### Layer 3: Supreme Court (Phase 2)")
+        # Supreme Court
+        st.markdown("### Layer 3: Supreme Court")
         with st.container(border=True):
             st.markdown("👨‍⚖️ **Chief Justice**")
-            st.progress(0, text="Phase 2")
+            st.caption("Deterministic conflict resolution • Security override • Fact supremacy")
+            if final_report:
+                st.progress(1.0, text=f"Done — {final_report.overall_score:.1f}/5.0 overall")
+            else:
+                st.progress(0, text="Waiting...")
 
     else:
         st.info(
@@ -303,6 +345,7 @@ graph TD
 with tab_evidence:
     if st.session_state.audit_result:
         evidences = st.session_state.audit_result.get("evidences", {})
+        opinions = st.session_state.audit_result.get("opinions", [])
 
         # Load dimension names for display
         try:
@@ -311,44 +354,105 @@ with tab_evidence:
         except Exception:
             dim_names = {}
 
-        for dim_id, ev_list in sorted(evidences.items()):
-            if dim_id.startswith("_"):
-                continue  # Skip meta entries
+        # Sub-tabs for evidence vs opinions
+        ev_tab, op_tab = st.tabs(["🔬 Forensic Evidence", "⚖️ Judicial Opinions"])
 
-            dim_name = dim_names.get(dim_id, dim_id)
-            found_in_dim = sum(1 for ev in ev_list if ev.found)
-            st.markdown(f"### {dim_name}")
-            st.caption(f"{len(ev_list)} evidence(s) — {found_in_dim} positive")
-
-            for ev in ev_list:
-                _render_evidence_card(ev)
-
-            st.divider()
-
-        # Raw JSON view
-        with st.expander("📦 Raw Evidence JSON"):
-            raw = {}
-            for dim_id, ev_list in evidences.items():
+        with ev_tab:
+            for dim_id, ev_list in sorted(evidences.items()):
                 if dim_id.startswith("_"):
                     continue
-                raw[dim_id] = [ev.model_dump() for ev in ev_list]
-            st.json(raw)
+
+                dim_name = dim_names.get(dim_id, dim_id)
+                found_in_dim = sum(1 for ev in ev_list if ev.found)
+                st.markdown(f"### {dim_name}")
+                st.caption(f"{len(ev_list)} evidence(s) — {found_in_dim} positive")
+
+                for ev in ev_list:
+                    _render_evidence_card(ev)
+
+                st.divider()
+
+            # Raw JSON view
+            with st.expander("📦 Raw Evidence JSON"):
+                raw = {}
+                for dim_id, ev_list in evidences.items():
+                    if dim_id.startswith("_"):
+                        continue
+                    raw[dim_id] = [ev.model_dump() for ev in ev_list]
+                st.json(raw)
+
+        with op_tab:
+            if opinions:
+                # Group by dimension
+                opinions_by_dim = {}
+                for op in opinions:
+                    opinions_by_dim.setdefault(op.criterion_id, []).append(op)
+
+                for dim_id, ops in sorted(opinions_by_dim.items()):
+                    dim_name = dim_names.get(dim_id, dim_id)
+                    scores = [o.score for o in ops]
+                    avg_score = sum(scores) / len(scores)
+                    st.markdown(f"### {dim_name}")
+                    st.caption(f"Average: {avg_score:.1f}/5 | Variance: {max(scores) - min(scores)}")
+
+                    for op in ops:
+                        icon = {"Prosecutor": "⚔️", "Defense": "🛡️", "TechLead": "🔧"}.get(op.judge, "📋")
+                        with st.expander(f"{icon} {op.judge}: {op.score}/5"):
+                            st.markdown(f"**Argument:** {op.argument}")
+                            if op.cited_evidence:
+                                st.markdown(f"**Cited:** {', '.join(op.cited_evidence)}")
+
+                    st.divider()
+
+                # Raw opinions JSON
+                with st.expander("📦 Raw Opinions JSON"):
+                    raw_ops = [op.model_dump() for op in opinions]
+                    st.json(raw_ops)
+            else:
+                st.info("No judicial opinions yet.")
     else:
-        st.info("Evidence will appear here after detectives complete their analysis.")
+        st.info("Evidence will appear here after the audit completes.")
 
 with tab_report:
     if st.session_state.audit_result and st.session_state.audit_result.get("final_report"):
         report = st.session_state.audit_result["final_report"]
+
+        # Score overview bar
+        st.markdown(f"## Overall Score: {report.overall_score:.1f} / 5.0")
+
+        # Per-dimension score cards
+        if report.criteria:
+            cols = st.columns(min(5, len(report.criteria)))
+            for i, cr in enumerate(report.criteria):
+                with cols[i % len(cols)]:
+                    color = "🟢" if cr.final_score >= 4 else "🟡" if cr.final_score == 3 else "🔴"
+                    st.metric(
+                        label=cr.dimension_name[:20],
+                        value=f"{cr.final_score}/5",
+                        help=cr.dimension_id,
+                    )
+
+        st.divider()
+
+        # Full Markdown report
         st.markdown(report.to_markdown())
+
+        # Download button
+        md_content = report.to_markdown()
+        st.download_button(
+            label="📥 Download Report (Markdown)",
+            data=md_content,
+            file_name="audit_report.md",
+            mime="text/markdown",
+        )
     else:
         st.info(
-            "The final audit report will be rendered here after the Chief Justice rules. "
-            "(Judges + Chief Justice coming in Phase 2.)"
+            "The final audit report will be rendered here after the Chief Justice rules."
         )
 
 # ── Footer ──
 st.divider()
 st.caption(
-    "Swarm Auditor v0.1.0 | Built with LangGraph + Streamlit | "
+    "Swarm Auditor v0.2.0 | Built with LangGraph + Streamlit | "
     "FDE Challenge Week 2: The Automaton Auditor"
 )
