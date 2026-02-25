@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
+
+# Load .env (LangSmith keys, Ollama config, etc.)
+load_dotenv()
 
 from src.graph import compile_graph, load_rubric_dimensions
 from src.state import Evidence, JudicialOpinion
@@ -120,6 +124,38 @@ def _save_uploaded_pdf(uploaded_file) -> str:
     return tmp.name
 
 
+# ── Helper: auto-save report to audit/ directory ────────────────────
+
+
+def _auto_save_report(report, target_url: str) -> str | None:
+    """Persist audit report as Markdown to the appropriate audit/ subdirectory.
+
+    Determines if this is a self-audit or peer-audit based on the repo URL,
+    and saves accordingly. Returns the output path or None on failure.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        # Determine output directory
+        own_repo = "Birkity/automaton-auditor-fde-week2"
+        parsed = urlparse(target_url)
+        repo_path = parsed.path.strip("/").rstrip(".git")
+
+        if repo_path.lower() == own_repo.lower():
+            out_dir = Path("audit/report_onself_generated")
+        else:
+            out_dir = Path("audit/report_onpeer_generated")
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "audit_report.md"
+        out_path.write_text(report.to_markdown(), encoding="utf-8")
+        print(f"[AutoSave] Report saved to {out_path}")
+        return str(out_path)
+    except Exception as e:
+        print(f"[AutoSave] Failed to save report: {e}")
+        return None
+
+
 # ── Helper: format evidence for display ─────────────────────────────
 
 
@@ -176,6 +212,11 @@ if run_audit and repo_url:
 
             status.update(label="✅ Full Pipeline Complete", state="complete")
             st.session_state.audit_result = result
+
+            # Auto-save report to audit/ directory
+            final_report = result.get("final_report")
+            if final_report:
+                _auto_save_report(final_report, repo_url)
 
     except Exception as e:
         st.session_state.audit_error = str(e)

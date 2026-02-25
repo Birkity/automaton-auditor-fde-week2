@@ -1,28 +1,36 @@
 """
 LangGraph StateGraph for the Swarm Auditor – Digital Courtroom.
 
-Architecture (Phase 2 — full pipeline):
+Architecture (Final pipeline with conditional edges):
   START
     → context_builder
-    → [repo_investigator ‖ doc_analyst ‖ vision_inspector]   (fan-out L1)
-    → evidence_aggregator                                     (fan-in  L1)
-    → [prosecutor ‖ defense ‖ tech_lead]                      (fan-out L2)
-    → chief_justice                                           (fan-in  L2)
-  → END
+    → [repo_investigator ‖ doc_analyst ‖ vision_inspector]    (fan-out L1)
+    → evidence_aggregator                                      (fan-in  L1)
+    → (conditional: has_evidence?)
+        YES → [prosecutor ‖ defense ‖ tech_lead]               (fan-out L2)
+              → chief_justice                                   (fan-in  L2)
+              → (conditional: report_valid?)
+                  YES → END
+                  NO  → END  (with degraded report)
+        NO  → no_evidence_handler → END
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
+from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
+
+# Ensure .env is loaded even when used as a library
+load_dotenv()
 
 from src.nodes.detectives import doc_analyst, repo_investigator, vision_inspector
 from src.nodes.judges import defense, prosecutor, tech_lead
 from src.nodes.chief_justice import chief_justice as chief_justice_node
-from src.state import AgentState, AuditReport, Evidence, RubricDimension
+from src.state import AgentState, AuditReport, CriterionResult, Evidence, RubricDimension
 
 
 # ── Utility: load rubric dimensions ─────────────────────────────────
@@ -66,16 +74,173 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
     This node validates completeness and logs summary stats.
     """
     evidences = state.get("evidences", {})
-    # Count evidence per dimension
-    summary = {dim_id: len(evs) for dim_id, evs in evidences.items()}
+    # Count evidence per dimension (excluding meta keys)
+    summary = {
+        dim_id: len(evs)
+        for dim_id, evs in evidences.items()
+        if not dim_id.startswith("_")
+    }
     # Log (for LangSmith tracing)
     print(f"[EvidenceAggregator] Collected evidence for {len(summary)} dimensions:")
     for dim_id, count in summary.items():
         print(f"  {dim_id}: {count} evidence(s)")
 
     # No state mutation needed — reducers already merged everything.
-    # Return empty dict (no overwrites).
     return {}
+
+
+# ── Conditional routing functions ───────────────────────────────────
+
+
+def route_after_evidence(
+    state: AgentState,
+) -> Literal["judge_dispatcher", "no_evidence_handler"]:
+    """Decide whether enough evidence was collected to proceed to judges.
+
+    Routes to 'no_evidence_handler' if zero real evidence dimensions exist,
+    otherwise routes to 'judge_dispatcher' (which fans out to the 3 judges).
+    """
+    evidences = state.get("evidences", {})
+    real_dims = {k: v for k, v in evidences.items() if not k.startswith("_")}
+
+    if not real_dims:
+        print("[Router] No evidence collected — routing to error handler.")
+        return "no_evidence_handler"
+
+    # Check if ALL evidence items report failure (nothing found at all)
+    any_found = any(
+        ev.found for evs in real_dims.values() for ev in evs
+    )
+    if not any_found:
+        print("[Router] All evidence negative — routing to error handler.")
+        return "no_evidence_handler"
+
+    print(f"[Router] Evidence present ({len(real_dims)} dims) — proceeding to judges.")
+    return "judge_dispatcher"
+
+
+def route_after_chief_justice(
+    state: AgentState,
+) -> Literal["end_success", "end_degraded"]:
+    """Validate the final report after Chief Justice synthesis.
+
+    Routes to 'end_success' if the report is valid, or 'end_degraded'
+    if the report is missing or incomplete.
+    """
+    report = state.get("final_report")
+
+    if report is None:
+        print("[Router] No report produced — ending with degraded state.")
+        return "end_degraded"
+
+    if not report.criteria:
+        print("[Router] Report has no criteria — ending with degraded state.")
+        return "end_degraded"
+
+    print(f"[Router] Report valid ({report.overall_score:.1f}/5.0) — ending successfully.")
+    return "end_success"
+
+
+# ── Error handler nodes ─────────────────────────────────────────────
+
+
+def no_evidence_handler(state: AgentState) -> Dict[str, Any]:
+    """Handle case where no evidence was collected.
+
+    Produces a minimal AuditReport explaining the failure, so the
+    pipeline always returns a structured result rather than crashing.
+    """
+    repo_url = state.get("repo_url", "unknown")
+    evidences = state.get("evidences", {})
+
+    print("[NoEvidenceHandler] Generating failure report...")
+
+    # Build minimal criterion results noting the absence
+    dims = state.get("rubric_dimensions", [])
+    criteria = []
+    for dim in dims:
+        criteria.append(
+            CriterionResult(
+                dimension_id=dim.id,
+                dimension_name=dim.name,
+                final_score=1,
+                judge_opinions=[],
+                dissent_summary=None,
+                remediation=(
+                    f"No evidence could be collected for '{dim.name}'. "
+                    "Ensure the repository URL is correct and accessible, "
+                    "and that a valid PDF report is provided."
+                ),
+            )
+        )
+
+    report = AuditReport(
+        repo_url=repo_url,
+        executive_summary=(
+            "AUDIT FAILED: The detective layer could not collect sufficient evidence. "
+            "This may indicate an invalid repository URL, network issues, or a "
+            "missing PDF report. All criteria default to score 1."
+        ),
+        overall_score=1.0,
+        criteria=criteria,
+        remediation_plan=(
+            "1. Verify the GitHub repository URL is correct and publicly accessible.\n"
+            "2. Ensure a valid PDF report is uploaded.\n"
+            "3. Check network connectivity and GitHub token configuration.\n"
+            "4. Re-run the audit after resolving the above issues."
+        ),
+    )
+
+    return {"final_report": report}
+
+
+def judge_dispatcher(state: AgentState) -> Dict[str, Any]:
+    """Pass-through node between evidence_aggregator and judges.
+
+    This node exists so that the conditional edge from evidence_aggregator
+    can route to a single target, which then fans out to the 3 judges
+    via regular edges. No state mutation.
+    """
+    evidence_count = sum(
+        len(v) for k, v in state.get("evidences", {}).items()
+        if not k.startswith("_")
+    )
+    print(f"[JudgeDispatcher] Dispatching {evidence_count} evidence(s) to 3 judges...")
+    return {}
+
+
+def report_fallback(state: AgentState) -> Dict[str, Any]:
+    """Handle case where Chief Justice produced an incomplete report.
+
+    Patches the report with a warning so the pipeline still terminates
+    with valid structured output.
+    """
+    report = state.get("final_report")
+    repo_url = state.get("repo_url", "unknown")
+
+    if report is None:
+        report = AuditReport(
+            repo_url=repo_url,
+            executive_summary=(
+                "DEGRADED REPORT: The Chief Justice could not produce a "
+                "complete verdict. Partial results may be available."
+            ),
+            overall_score=1.0,
+            criteria=[],
+            remediation_plan="Re-run the audit. Check LLM connectivity and logs.",
+        )
+    else:
+        # Patch the existing report with a warning
+        report = report.model_copy(
+            update={
+                "executive_summary": (
+                    "WARNING (degraded): " + report.executive_summary
+                ),
+            }
+        )
+
+    print("[ReportFallback] Patched degraded report.")
+    return {"final_report": report}
 
 
 # ── Graph Builder ───────────────────────────────────────────────────
@@ -84,13 +249,17 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
 def build_graph() -> StateGraph:
     """Build and return the StateGraph with full pipeline.
 
-    Phase 2 wiring — two parallel fan-out / fan-in layers:
+    Final wiring with conditional edges for error handling:
       START → context_builder
             → [repo_investigator ‖ doc_analyst ‖ vision_inspector]  (L1 fan-out)
             → evidence_aggregator                                    (L1 fan-in)
-            → [prosecutor ‖ defense ‖ tech_lead]                     (L2 fan-out)
-            → chief_justice                                          (L2 fan-in)
-            → END
+            → conditional: has evidence?
+                YES → [prosecutor ‖ defense ‖ tech_lead]             (L2 fan-out)
+                      → chief_justice                                (L2 fan-in)
+                      → conditional: report valid?
+                          YES → END
+                          NO  → report_fallback → END
+                NO  → no_evidence_handler → END
     """
     graph = StateGraph(AgentState)
 
@@ -101,12 +270,18 @@ def build_graph() -> StateGraph:
     graph.add_node("doc_analyst", doc_analyst)
     graph.add_node("vision_inspector", vision_inspector)
     graph.add_node("evidence_aggregator", evidence_aggregator)
+    # Error handler: no evidence path
+    graph.add_node("no_evidence_handler", no_evidence_handler)
+    # Dispatcher: routes evidence to judges
+    graph.add_node("judge_dispatcher", judge_dispatcher)
     # L2: Judges
     graph.add_node("prosecutor", prosecutor)
     graph.add_node("defense", defense)
     graph.add_node("tech_lead", tech_lead)
     # L3: Chief Justice
     graph.add_node("chief_justice", chief_justice_node)
+    # Error handler: degraded report path
+    graph.add_node("report_fallback", report_fallback)
 
     # ── Edges ──
     # Entry
@@ -122,18 +297,41 @@ def build_graph() -> StateGraph:
     graph.add_edge("doc_analyst", "evidence_aggregator")
     graph.add_edge("vision_inspector", "evidence_aggregator")
 
-    # L2 Fan-out: evidence_aggregator → 3 judges in parallel
-    graph.add_edge("evidence_aggregator", "prosecutor")
-    graph.add_edge("evidence_aggregator", "defense")
-    graph.add_edge("evidence_aggregator", "tech_lead")
+    # Conditional edge: evidence_aggregator → judge_dispatcher or error handler
+    graph.add_conditional_edges(
+        "evidence_aggregator",
+        route_after_evidence,
+        {
+            "judge_dispatcher": "judge_dispatcher",
+            "no_evidence_handler": "no_evidence_handler",
+        },
+    )
+
+    # Error handler → END
+    graph.add_edge("no_evidence_handler", END)
+
+    # L2 Fan-out: judge_dispatcher → 3 judges in parallel
+    graph.add_edge("judge_dispatcher", "prosecutor")
+    graph.add_edge("judge_dispatcher", "defense")
+    graph.add_edge("judge_dispatcher", "tech_lead")
 
     # L2 Fan-in: 3 judges → chief_justice
     graph.add_edge("prosecutor", "chief_justice")
     graph.add_edge("defense", "chief_justice")
     graph.add_edge("tech_lead", "chief_justice")
 
-    # Exit
-    graph.add_edge("chief_justice", END)
+    # Conditional edge: chief_justice → success or fallback
+    graph.add_conditional_edges(
+        "chief_justice",
+        route_after_chief_justice,
+        {
+            "end_success": END,
+            "end_degraded": "report_fallback",
+        },
+    )
+
+    # Fallback → END
+    graph.add_edge("report_fallback", END)
 
     return graph
 
