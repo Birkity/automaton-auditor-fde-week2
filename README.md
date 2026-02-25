@@ -34,7 +34,7 @@ START
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/Birkity/automaton-auditor-fde-week2
 cd swarm-auditor
 
 # Install dependencies with uv
