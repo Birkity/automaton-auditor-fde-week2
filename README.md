@@ -9,18 +9,24 @@
 ```
 START
   → context_builder
-  → [RepoInvestigator ‖ DocAnalyst ‖ VisionInspector]   (Detective Fan-Out)
-  → evidence_aggregator                                   (Fan-In)
-  → [Prosecutor ‖ Defense ‖ TechLead]                     (Judicial Fan-Out)
-  → chief_justice                                          (Synthesis)
-→ END
+  → [RepoInvestigator ‖ DocAnalyst ‖ VisionInspector]    (Detective Fan-Out)
+  → evidence_aggregator                                    (Fan-In)
+  → (conditional: has_evidence?)
+      YES → judge_dispatcher
+            → [Prosecutor ‖ Defense ‖ TechLead]            (Judicial Fan-Out)
+            → chief_justice                                 (Synthesis)
+            → (conditional: report_valid?)
+                YES → END
+                NO  → report_fallback → END
+      NO  → no_evidence_handler → END
 ```
 
 | Layer | Components | Brain/Tool | Purpose |
 |-------|-----------|------------|---------|
-| **L1: Detectives** | RepoInvestigator, DocAnalyst, VisionInspector | Pure Python (no LLM) | Forensic evidence collection via AST, git, PDF parsing |
+| **L1: Detectives** | RepoInvestigator, DocAnalyst, VisionInspector | Pure Python (no LLM) + Multimodal LLM (Vision) | Forensic evidence collection via AST, git, PDF parsing, diagram classification |
 | **L2: Judges** | Prosecutor, Defense, Tech Lead | LLM + Structured Output | Dialectical analysis from 3 adversarial personas |
-| **L3: Supreme Court** | Chief Justice | Deterministic Python + LLM | Conflict resolution with hardcoded rules |
+| **L3: Supreme Court** | Chief Justice | Deterministic Python | Conflict resolution with hardcoded rules |
+| **Error Handling** | no_evidence_handler, report_fallback | Pure Python | Conditional edge routing for failures |
 
 ## Quick Start
 
@@ -66,17 +72,20 @@ uv run streamlit run app.py
 
 ```
 swarm-auditor/
-├── app.py                    # Streamlit frontend
+├── app.py                    # Streamlit frontend (v0.3.0)
+├── run_audit.py              # CLI entry point for audits
+├── Dockerfile                # Containerized runtime
 ├── rubric.json               # Machine-readable 10-dimension rubric (v3.0.0)
 ├── pyproject.toml            # Dependencies (managed by uv)
 ├── .env.example              # Environment variable template
 ├── src/
 │   ├── state.py              # Pydantic models + AgentState TypedDict
-│   ├── graph.py              # LangGraph StateGraph with fan-out/fan-in
+│   ├── graph.py              # LangGraph StateGraph with conditional edges
+│   ├── prompts.py            # Judge persona prompts (Prosecutor, Defense, TechLead)
 │   ├── tools/
 │   │   ├── repo_tools.py     # Sandboxed git, AST parsing, git log
 │   │   ├── doc_tools.py      # PDF ingestion, chunked querying
-│   │   └── vision_tools.py   # Image extraction (placeholder)
+│   │   └── vision_tools.py   # Multimodal LLM diagram classification
 │   └── nodes/
 │       ├── detectives.py     # RepoInvestigator, DocAnalyst, VisionInspector
 │       ├── judges.py         # Prosecutor, Defense, TechLead (LLM judges)
@@ -86,10 +95,11 @@ swarm-auditor/
 │   ├── test_repo_tools.py    # Repo tool tests (25)
 │   ├── test_doc_tools.py     # Doc tool tests (21)
 │   ├── test_detectives.py    # Detective node tests (24)
-│   ├── test_graph.py         # Graph topology tests (20)
+│   ├── test_graph.py         # Graph topology + conditional edge tests (28)
 │   ├── test_prompts.py       # Prompt persona tests (14)
 │   ├── test_judges.py        # Judge node tests (13)
-│   └── test_chief_justice.py # Chief Justice logic tests (31)
+│   ├── test_chief_justice.py # Chief Justice logic tests (31)
+│   └── test_vision_tools.py  # Vision multimodal analysis tests (14)
 ├── audit/
 │   ├── report_onself_generated/   # Self-audit output
 │   ├── report_onpeer_generated/   # Peer audit output
@@ -101,18 +111,35 @@ swarm-auditor/
 
 ```bash
 # Run against a target repository (CLI)
-uv run python -m src.graph --repo-url https://github.com/user/repo --pdf report.pdf
+uv run python run_audit.py https://github.com/user/repo --pdf report.pdf
+
+# Self-audit (saves to audit/report_onself_generated/)
+uv run python run_audit.py https://github.com/Birkity/automaton-auditor-fde-week2 \
+    --pdf reports/interim_report.pdf \
+    --output-dir audit/report_onself_generated
+
+# Peer audit (saves to audit/report_onpeer_generated/)
+uv run python run_audit.py https://github.com/peer/week2-repo \
+    --pdf peer_report.pdf \
+    --output-dir audit/report_onpeer_generated
 
 # Run the Streamlit UI
 uv run streamlit run app.py
+
+# Run with Docker
+docker build -t swarm-auditor .
+docker run -p 8501:8501 --env-file .env swarm-auditor
 ```
 
 ## Key Design Decisions
 
-1. **Brain/Tools Split**: Detectives are pure Python (AST, subprocess, PyMuPDF) — zero LLM usage. Only Judges and ChiefJustice use LLMs.
+1. **Brain/Tools Split**: Detectives are pure Python (AST, subprocess, PyMuPDF) — zero LLM usage. Only Judges use LLMs. ChiefJustice is fully deterministic.
 2. **Pydantic Everywhere**: Every state boundary uses typed Pydantic models. `AgentState` uses `Annotated` reducers (`operator.add`, `operator.ior`) for safe parallel merging.
 3. **Sandboxed Execution**: All git operations run in `tempfile.TemporaryDirectory()`. No `os.system()` calls.
 4. **Deep AST Parsing**: Code analysis uses Python's `ast` module — no regex.
 5. **Dialectical Synthesis**: Three adversarial judge personas with deterministic conflict resolution rules, not LLM averaging.
+6. **Conditional Error Routing**: `add_conditional_edges()` routes to error handlers when evidence is missing or the report is invalid.
+7. **Multimodal Vision**: VisionInspector uses a multimodal LLM (llava) for diagram classification, with graceful fallback when unavailable.
+8. **Auto-save Reports**: Audit reports auto-persist to `audit/` subdirectories based on target URL.
 
 

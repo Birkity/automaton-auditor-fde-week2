@@ -191,7 +191,7 @@ if run_audit and repo_url:
 
     try:
         with st.status("⚖️ Running Full Audit Pipeline...", expanded=True) as status:
-            st.write("Compiling LangGraph StateGraph (9 nodes, 2 fan-out/fan-in layers)...")
+            st.write("Compiling LangGraph StateGraph (12 nodes, conditional edges)...")
             graph = compile_graph()
 
             st.write("Loading rubric dimensions (10 dimensions, v3.0.0)...")
@@ -373,13 +373,18 @@ graph TD
     RI --> EA[evidence_aggregator]
     DA --> EA
     VI --> EA
-    EA --> P[Prosecutor]
-    EA --> D[Defense]
-    EA --> TL[TechLead]
+    EA -.->|has evidence| JD[judge_dispatcher]
+    EA -.->|no evidence| NEH[no_evidence_handler]
+    JD --> P[Prosecutor]
+    JD --> D[Defense]
+    JD --> TL[TechLead]
     P --> CJ[ChiefJustice]
     D --> CJ
     TL --> CJ
-    CJ --> END([END])
+    CJ -.->|valid| END([END])
+    CJ -.->|degraded| RF[report_fallback]
+    NEH --> END
+    RF --> END
 ```
 """)
 
@@ -494,6 +499,6 @@ with tab_report:
 # ── Footer ──
 st.divider()
 st.caption(
-    "Swarm Auditor v0.2.0 | Built with LangGraph + Streamlit | "
+    "Swarm Auditor v0.3.0 | Built with LangGraph + Streamlit | "
     "FDE Challenge Week 2: The Automaton Auditor"
 )
