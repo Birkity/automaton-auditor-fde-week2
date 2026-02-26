@@ -1,19 +1,24 @@
 """
 VisionInspector Tools — Multimodal image analysis for diagram classification.
 
-Uses the Qwen2.5-VL-32B-Instruct vision-language model from Hugging Face
-to classify architectural diagrams extracted from PDF reports.
+Uses vision-language models to classify architectural diagrams extracted from
+PDF reports.
+
+Strategy (ordered by preference):
+  1. HuggingFace Inference API — sends images to HF's cloud servers running
+     Qwen2.5-VL-32B-Instruct (requires HF_TOKEN env var).
+  2. Ollama vision model — uses a local/cloud Ollama vision model like llava,
+     minicpm-v, or llama3.2-vision (requires OLLAMA_VISION_MODEL env var).
+  3. Local HuggingFace model — loads Qwen2.5-VL locally (needs ~64 GB VRAM).
+  4. Graceful fallback — metadata-only evidence (low confidence).
 
 The image extraction is handled by doc_tools.extract_images_from_pdf().
 This module adds the multimodal analysis layer on top.
-
-Execution is optional: if the vision model cannot be loaded (missing deps,
-insufficient GPU memory, etc.) the tool falls back gracefully to
-metadata-only evidence (low confidence).
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -27,6 +32,11 @@ from src.state import Evidence
 VISION_HF_MODEL = os.environ.get(
     "VISION_HF_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"
 )
+
+HF_TOKEN = os.environ.get("HF_TOKEN", None)
+
+OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Prompt for diagram classification
 DIAGRAM_CLASSIFICATION_PROMPT = (
@@ -46,7 +56,20 @@ DIAGRAM_CLASSIFICATION_PROMPT = (
 )
 
 
-# ── Lazy model loading (singleton) ──────────────────────────────────
+# ── Extension → MIME type mapping ───────────────────────────────────
+
+_EXT_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+    "tiff": "image/tiff",
+}
+
+
+# ── Lazy singleton for local model (fallback only) ──────────────────
 
 _processor: Optional[Any] = None
 _model: Optional[Any] = None
@@ -54,11 +77,10 @@ _load_attempted: bool = False
 
 
 def _load_vision_model() -> tuple:
-    """Load Qwen2.5-VL model and processor once (lazy singleton).
+    """Load Qwen2.5-VL model and processor locally (lazy singleton).
 
     Returns (processor, model) on success, (None, None) on failure.
-    The load is attempted only once — subsequent calls return the cached
-    result instantly.
+    Attempted only once — subsequent calls return the cached result.
     """
     global _processor, _model, _load_attempted
 
@@ -70,35 +92,163 @@ def _load_vision_model() -> tuple:
     try:
         from transformers import AutoProcessor, AutoModelForImageTextToText
 
-        print(f"[VisionInspector] Loading {VISION_HF_MODEL} from Hugging Face...")
+        print(f"[VisionInspector] Loading {VISION_HF_MODEL} locally...")
         _processor = AutoProcessor.from_pretrained(VISION_HF_MODEL)
         _model = AutoModelForImageTextToText.from_pretrained(
             VISION_HF_MODEL,
             torch_dtype="auto",
             device_map="auto",
         )
-        print(f"[VisionInspector] {VISION_HF_MODEL} loaded successfully.")
+        print(f"[VisionInspector] {VISION_HF_MODEL} loaded locally.")
     except Exception as e:
-        print(f"[VisionInspector] Failed to load {VISION_HF_MODEL}: {e}")
+        print(f"[VisionInspector] Local model load failed: {e}")
         _processor = None
         _model = None
 
     return _processor, _model
 
 
-def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
-    """Classify an image using the Qwen2.5-VL vision-language model.
+# ── Strategy 1: HuggingFace Inference API (cloud) ──────────────────
 
-    Converts raw image bytes to a PIL Image, builds a chat message,
-    and runs inference through Qwen2.5-VL.
 
+def _invoke_vision_api(image_bytes: bytes, ext: str) -> dict | None:
+    """Classify an image via the HuggingFace Inference API (serverless).
+
+    Sends the image as a base64 data URL to Qwen2.5-VL running on HF's
+    infrastructure. No local GPU required.
+
+    Returns parsed JSON dict on success, None on failure.
+    """
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError:
+        print("[VisionInspector] huggingface_hub not installed.")
+        return None
+
+    try:
+        mime = _EXT_MIME.get(ext.lower().lstrip("."), "image/png")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime};base64,{b64}"
+
+        client = InferenceClient(
+            provider="hf-inference",
+            api_key=HF_TOKEN,
+        )
+
+        completion = client.chat.completions.create(
+            model=VISION_HF_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
+                    ],
+                }
+            ],
+            max_tokens=512,
+        )
+
+        response_text = completion.choices[0].message.content
+
+        # Parse JSON (strip markdown fences if present)
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        parsed = json.loads(clean)
+        print(f"[VisionInspector] HF API success — type={parsed.get('type')}")
+        return parsed
+
+    except Exception as e:
+        print(f"[VisionInspector] HF Inference API failed: {e}")
+        return None
+
+
+# ── Strategy 2: Ollama vision model ─────────────────────────────────
+
+
+def _invoke_vision_ollama(image_bytes: bytes, ext: str) -> dict | None:
+    """Classify an image using an Ollama vision model (llava, minicpm-v, etc.).
+
+    Requires OLLAMA_VISION_MODEL env var to be set (e.g. 'llava').
+    Uses base64 encoding to send the image via the Ollama chat API.
+
+    Returns parsed JSON dict on success, None on failure.
+    """
+    if not OLLAMA_VISION_MODEL:
+        return None
+
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError:
+        print("[VisionInspector] langchain_ollama not installed.")
+        return None
+
+    try:
+        import base64 as b64mod
+
+        b64_str = b64mod.b64encode(image_bytes).decode("ascii")
+        mime = _EXT_MIME.get(ext.lower().lstrip("."), "image/png")
+
+        llm = ChatOllama(
+            model=OLLAMA_VISION_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            temperature=0,
+        )
+
+        from langchain_core.messages import HumanMessage
+
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64_str}"},
+                },
+                {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
+            ]
+        )
+
+        response = llm.invoke([message])
+        response_text = response.content
+
+        # Parse JSON (strip markdown fences if present)
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        parsed = json.loads(clean)
+        print(
+            f"[VisionInspector] Ollama ({OLLAMA_VISION_MODEL}) success "
+            f"— type={parsed.get('type')}"
+        )
+        return parsed
+
+    except Exception as e:
+        print(f"[VisionInspector] Ollama vision failed: {e}")
+        return None
+
+
+# ── Strategy 3: Local model (fallback) ─────────────────────────────
+
+
+def _invoke_vision_local(image_bytes: bytes, ext: str) -> dict | None:
+    """Classify an image using a locally-loaded Qwen2.5-VL model.
+
+    Only works if a GPU with ~64 GB VRAM is available.
     Returns parsed JSON dict on success, None on failure.
     """
     try:
         import torch
         from PIL import Image
     except ImportError as e:
-        print(f"[VisionInspector] Missing dependency: {e}")
+        print(f"[VisionInspector] Missing dependency for local model: {e}")
         return None
 
     processor, model = _load_vision_model()
@@ -106,10 +256,8 @@ def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
         return None
 
     try:
-        # Convert raw bytes → PIL Image
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        # Build chat messages in Qwen2.5-VL format
         messages = [
             {
                 "role": "user",
@@ -120,7 +268,6 @@ def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
             }
         ]
 
-        # Apply chat template and tokenise
         text = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -128,17 +275,14 @@ def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
             text=[text], images=[image], return_tensors="pt"
         ).to(model.device)
 
-        # Generate response
         with torch.no_grad():
             output_ids = model.generate(**inputs, max_new_tokens=512)
 
-        # Decode only the generated portion (exclude the prompt tokens)
         generated_ids = output_ids[:, inputs.input_ids.shape[1] :]
         response_text = processor.batch_decode(
             generated_ids, skip_special_tokens=True
         )[0]
 
-        # Parse JSON (strip markdown fences if present)
         clean = response_text.strip()
         if clean.startswith("```"):
             clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
@@ -149,8 +293,38 @@ def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
         return json.loads(clean)
 
     except Exception as e:
-        print(f"[VisionInspector] Qwen2.5-VL analysis failed: {e}")
+        print(f"[VisionInspector] Local model analysis failed: {e}")
         return None
+
+
+# ── Combined dispatch ───────────────────────────────────────────────
+
+
+def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
+    """Classify an image using a vision-language model.
+
+    Strategy (ordered by preference):
+      1. HuggingFace Inference API (cloud, needs HF_TOKEN).
+      2. Ollama vision model (needs OLLAMA_VISION_MODEL set).
+      3. Local HuggingFace model (needs ~64 GB VRAM).
+      4. Return None — caller uses metadata-only evidence.
+    """
+    # Strategy 1: HF cloud API
+    result = _invoke_vision_api(image_bytes, ext)
+    if result is not None:
+        return result
+
+    # Strategy 2: Ollama vision model
+    result = _invoke_vision_ollama(image_bytes, ext)
+    if result is not None:
+        return result
+
+    # Strategy 3: local model
+    result = _invoke_vision_local(image_bytes, ext)
+    if result is not None:
+        return result
+
+    return None
 
 
 def analyze_diagrams(

@@ -499,6 +499,6 @@ with tab_report:
 # ── Footer ──
 st.divider()
 st.caption(
-    "Swarm Auditor v0.3.0 | Built with LangGraph + Streamlit | "
+    "Swarm Auditor v0.4.0 | Built with LangGraph + Streamlit | "
     "FDE Challenge Week 2: The Automaton Auditor"
 )
