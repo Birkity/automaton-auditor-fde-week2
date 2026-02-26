@@ -7,10 +7,8 @@ PDF reports.
 Strategy (ordered by preference):
   1. HuggingFace Inference API — sends images to HF's cloud servers running
      Qwen2.5-VL-32B-Instruct (requires HF_TOKEN env var).
-  2. Ollama vision model — uses a local/cloud Ollama vision model like llava,
-     minicpm-v, or llama3.2-vision (requires OLLAMA_VISION_MODEL env var).
-  3. Local HuggingFace model — loads Qwen2.5-VL locally (needs ~64 GB VRAM).
-  4. Graceful fallback — metadata-only evidence (low confidence).
+  2. Local HuggingFace model — loads Qwen2.5-VL locally (needs ~64 GB VRAM).
+  3. Graceful fallback — metadata-only evidence (low confidence).
 
 The image extraction is handled by doc_tools.extract_images_from_pdf().
 This module adds the multimodal analysis layer on top.
@@ -34,9 +32,6 @@ VISION_HF_MODEL = os.environ.get(
 )
 
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
-
-OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "")
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Prompt for diagram classification
 DIAGRAM_CLASSIFICATION_PROMPT = (
@@ -168,74 +163,7 @@ def _invoke_vision_api(image_bytes: bytes, ext: str) -> dict | None:
         return None
 
 
-# ── Strategy 2: Ollama vision model ─────────────────────────────────
-
-
-def _invoke_vision_ollama(image_bytes: bytes, ext: str) -> dict | None:
-    """Classify an image using an Ollama vision model (llava, minicpm-v, etc.).
-
-    Requires OLLAMA_VISION_MODEL env var to be set (e.g. 'llava').
-    Uses base64 encoding to send the image via the Ollama chat API.
-
-    Returns parsed JSON dict on success, None on failure.
-    """
-    if not OLLAMA_VISION_MODEL:
-        return None
-
-    try:
-        from langchain_ollama import ChatOllama
-    except ImportError:
-        print("[VisionInspector] langchain_ollama not installed.")
-        return None
-
-    try:
-        import base64 as b64mod
-
-        b64_str = b64mod.b64encode(image_bytes).decode("ascii")
-        mime = _EXT_MIME.get(ext.lower().lstrip("."), "image/png")
-
-        llm = ChatOllama(
-            model=OLLAMA_VISION_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0,
-        )
-
-        from langchain_core.messages import HumanMessage
-
-        message = HumanMessage(
-            content=[
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64_str}"},
-                },
-                {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
-            ]
-        )
-
-        response = llm.invoke([message])
-        response_text = response.content
-
-        # Parse JSON (strip markdown fences if present)
-        clean = response_text.strip()
-        if clean.startswith("```"):
-            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
-            if clean.endswith("```"):
-                clean = clean[:-3]
-            clean = clean.strip()
-
-        parsed = json.loads(clean)
-        print(
-            f"[VisionInspector] Ollama ({OLLAMA_VISION_MODEL}) success "
-            f"— type={parsed.get('type')}"
-        )
-        return parsed
-
-    except Exception as e:
-        print(f"[VisionInspector] Ollama vision failed: {e}")
-        return None
-
-
-# ── Strategy 3: Local model (fallback) ─────────────────────────────
+# ── Strategy 2: Local model (fallback) ─────────────────────────────
 
 
 def _invoke_vision_local(image_bytes: bytes, ext: str) -> dict | None:
@@ -301,25 +229,19 @@ def _invoke_vision_local(image_bytes: bytes, ext: str) -> dict | None:
 
 
 def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
-    """Classify an image using a vision-language model.
+    """Classify an image using Qwen2.5-VL via HuggingFace.
 
     Strategy (ordered by preference):
       1. HuggingFace Inference API (cloud, needs HF_TOKEN).
-      2. Ollama vision model (needs OLLAMA_VISION_MODEL set).
-      3. Local HuggingFace model (needs ~64 GB VRAM).
-      4. Return None — caller uses metadata-only evidence.
+      2. Local HuggingFace model (needs ~64 GB VRAM).
+      3. Return None — caller uses metadata-only evidence.
     """
     # Strategy 1: HF cloud API
     result = _invoke_vision_api(image_bytes, ext)
     if result is not None:
         return result
 
-    # Strategy 2: Ollama vision model
-    result = _invoke_vision_ollama(image_bytes, ext)
-    if result is not None:
-        return result
-
-    # Strategy 3: local model
+    # Strategy 2: local model
     result = _invoke_vision_local(image_bytes, ext)
     if result is not None:
         return result
