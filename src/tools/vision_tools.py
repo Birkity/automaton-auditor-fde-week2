@@ -1,29 +1,32 @@
 """
 VisionInspector Tools — Multimodal image analysis for diagram classification.
 
-Uses a multimodal LLM (e.g. llava, llama3.2-vision) through Ollama to classify
-architectural diagrams extracted from PDF reports.
+Uses the Qwen2.5-VL-32B-Instruct vision-language model from Hugging Face
+to classify architectural diagrams extracted from PDF reports.
 
 The image extraction is handled by doc_tools.extract_images_from_pdf().
 This module adds the multimodal analysis layer on top.
 
-Execution is optional: if the vision model is unavailable the tool
-falls back gracefully to metadata-only evidence (low confidence).
+Execution is optional: if the vision model cannot be loaded (missing deps,
+insufficient GPU memory, etc.) the tool falls back gracefully to
+metadata-only evidence (low confidence).
 """
 
 from __future__ import annotations
 
-import base64
+import io
+import json
 import os
-from typing import List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from src.state import Evidence
 
 
 # ── Configuration ───────────────────────────────────────────────────
 
-VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llava")
-VISION_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+VISION_HF_MODEL = os.environ.get(
+    "VISION_HF_MODEL", "Qwen/Qwen2.5-VL-32B-Instruct"
+)
 
 # Prompt for diagram classification
 DIAGRAM_CLASSIFICATION_PROMPT = (
@@ -43,63 +46,110 @@ DIAGRAM_CLASSIFICATION_PROMPT = (
 )
 
 
+# ── Lazy model loading (singleton) ──────────────────────────────────
+
+_processor: Optional[Any] = None
+_model: Optional[Any] = None
+_load_attempted: bool = False
+
+
+def _load_vision_model() -> tuple:
+    """Load Qwen2.5-VL model and processor once (lazy singleton).
+
+    Returns (processor, model) on success, (None, None) on failure.
+    The load is attempted only once — subsequent calls return the cached
+    result instantly.
+    """
+    global _processor, _model, _load_attempted
+
+    if _load_attempted:
+        return _processor, _model
+
+    _load_attempted = True
+
+    try:
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+
+        print(f"[VisionInspector] Loading {VISION_HF_MODEL} from Hugging Face...")
+        _processor = AutoProcessor.from_pretrained(VISION_HF_MODEL)
+        _model = AutoModelForImageTextToText.from_pretrained(
+            VISION_HF_MODEL,
+            torch_dtype="auto",
+            device_map="auto",
+        )
+        print(f"[VisionInspector] {VISION_HF_MODEL} loaded successfully.")
+    except Exception as e:
+        print(f"[VisionInspector] Failed to load {VISION_HF_MODEL}: {e}")
+        _processor = None
+        _model = None
+
+    return _processor, _model
+
+
 def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
-    """Call the Ollama vision model with a base64-encoded image.
+    """Classify an image using the Qwen2.5-VL vision-language model.
+
+    Converts raw image bytes to a PIL Image, builds a chat message,
+    and runs inference through Qwen2.5-VL.
 
     Returns parsed JSON dict on success, None on failure.
     """
-    import json
-
     try:
-        from langchain_ollama import ChatOllama
-        from langchain_core.messages import HumanMessage
-    except ImportError:
+        import torch
+        from PIL import Image
+    except ImportError as e:
+        print(f"[VisionInspector] Missing dependency: {e}")
+        return None
+
+    processor, model = _load_vision_model()
+    if processor is None or model is None:
         return None
 
     try:
-        llm = ChatOllama(
-            model=VISION_MODEL,
-            base_url=VISION_BASE_URL,
-            temperature=0.1,
+        # Convert raw bytes → PIL Image
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        # Build chat messages in Qwen2.5-VL format
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
+                ],
+            }
+        ]
+
+        # Apply chat template and tokenise
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
+        inputs = processor(
+            text=[text], images=[image], return_tensors="pt"
+        ).to(model.device)
 
-        # Encode image as base64 data URL
-        mime = {
-            "png": "image/png",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "gif": "image/gif",
-            "webp": "image/webp",
-            "bmp": "image/bmp",
-        }.get(ext.lower().strip("."), "image/png")
+        # Generate response
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, max_new_tokens=512)
 
-        b64_data = base64.b64encode(image_bytes).decode("utf-8")
+        # Decode only the generated portion (exclude the prompt tokens)
+        generated_ids = output_ids[:, inputs.input_ids.shape[1] :]
+        response_text = processor.batch_decode(
+            generated_ids, skip_special_tokens=True
+        )[0]
 
-        message = HumanMessage(
-            content=[
-                {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64_data}"},
-                },
-            ]
-        )
+        # Parse JSON (strip markdown fences if present)
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
 
-        response = llm.invoke([message])
-        text = response.content if hasattr(response, "content") else str(response)
-
-        # Attempt JSON parse (strip markdown fences if present)
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-        return json.loads(text)
+        return json.loads(clean)
 
     except Exception as e:
-        print(f"[VisionInspector] Vision LLM call failed: {e}")
+        print(f"[VisionInspector] Qwen2.5-VL analysis failed: {e}")
         return None
 
 
@@ -229,9 +279,10 @@ def analyze_diagrams(
                     ),
                     location=f"PDF page {page}, image {idx + 1}",
                     rationale=(
-                        "Image extracted successfully. Multimodal LLM was "
-                        "unavailable for classification. Re-run with a vision "
-                        f"model (set OLLAMA_VISION_MODEL, current: {VISION_MODEL})."
+                        "Image extracted successfully. Qwen2.5-VL model was "
+                        "unavailable for classification. Ensure 'transformers', "
+                        "'torch', and 'Pillow' are installed with sufficient "
+                        f"GPU memory (model: {VISION_HF_MODEL})."
                     ),
                     confidence=0.3,
                 )

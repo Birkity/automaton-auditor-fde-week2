@@ -1,9 +1,12 @@
 """
-Chief Justice Node — Deterministic conflict resolution engine.
+Chief Justice Node — Deterministic conflict resolution engine with LLM enhancement.
 
-The Chief Justice is NOT an LLM prompt. It uses hardcoded Python if/else
-logic implementing the five synthesis rules from rubric.json:
+The Chief Justice uses hardcoded Python if/else logic implementing the five
+synthesis rules from rubric.json.  After deterministic scoring, an optional
+LLM pass (deepseek) generates a polished executive summary and remediation
+plan, making the system rubric-independent for report quality.
 
+Rules (deterministic — always applied):
   1. Security Override — confirmed security flaws cap score at 3.
   2. Fact Supremacy — detective evidence overrules judicial opinion.
   3. Functionality Weight — Tech Lead carries highest weight for architecture.
@@ -17,9 +20,13 @@ Architecture:
 from __future__ import annotations
 
 import json
+import os
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
 
 from src.state import (
     AgentState,
@@ -316,6 +323,26 @@ def _build_audit_report(
         else "All dimensions scored 5/5. No remediation needed."
     )
 
+    # ── LLM Enhancement: polish executive summary + remediation ─────
+    # The deterministic scores/rules are already applied. The LLM only
+    # enhances the *text quality* of the summary and remediation plan,
+    # making Chief Justice rubric-independent for report generation.
+    try:
+        llm = _create_justice_llm()
+        if llm is not None:
+            polished = _llm_polish_report(
+                llm, executive_summary, remediation_plan, criteria, repo_url
+            )
+            if polished:
+                executive_summary = polished.get(
+                    "executive_summary", executive_summary
+                )
+                remediation_plan = polished.get(
+                    "remediation_plan", remediation_plan
+                )
+    except Exception as e:
+        print(f"[ChiefJustice] LLM polish skipped: {e}")
+
     return AuditReport(
         repo_url=repo_url,
         executive_summary=executive_summary,
@@ -325,14 +352,87 @@ def _build_audit_report(
     )
 
 
+# ── LLM helpers for Chief Justice ───────────────────────────────────
+
+_JUSTICE_MODEL = os.environ.get(
+    "OLLAMA_DETECTIVE_MODEL",
+    os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud"),
+)
+_JUSTICE_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+_JUSTICE_SYSTEM = (
+    "You are the Chief Justice of a Digital Courtroom for code governance. "
+    "You have already determined the scores using deterministic rules. "
+    "Your job now is to write a polished, professional executive summary and "
+    "actionable remediation plan based on the scoring data below.\n\n"
+    "Return ONLY a JSON object (no markdown fences) with these fields:\n"
+    '  "executive_summary": string — a 2-3 paragraph professional summary\n'
+    '  "remediation_plan": string — specific, file-level Markdown instructions\n'
+)
+
+
+def _create_justice_llm() -> Optional[ChatOllama]:
+    """Create an LLM for Chief Justice report polishing."""
+    try:
+        return ChatOllama(
+            model=_JUSTICE_MODEL,
+            base_url=_JUSTICE_BASE_URL,
+            temperature=0.2,
+        )
+    except Exception:
+        return None
+
+
+def _llm_polish_report(
+    llm: ChatOllama,
+    executive_summary: str,
+    remediation_plan: str,
+    criteria: List[CriterionResult],
+    repo_url: str,
+) -> Optional[Dict[str, str]]:
+    """Use LLM to polish the executive summary and remediation plan."""
+    scores_text = "\n".join(
+        f"- {c.dimension_name}: {c.final_score}/5"
+        + (f" [DISSENT: {c.dissent_summary[:100]}]" if c.dissent_summary else "")
+        for c in criteria
+    )
+    human_text = (
+        f"## Repository: {repo_url}\n\n"
+        f"## Scores\n{scores_text}\n\n"
+        f"## Current Executive Summary\n{executive_summary}\n\n"
+        f"## Current Remediation Plan\n{remediation_plan[:3000]}\n\n"
+        "Rewrite BOTH to be more professional, specific, and actionable. "
+        "Keep all scores unchanged. Return JSON only."
+    )
+
+    try:
+        response = llm.invoke([
+            SystemMessage(content=_JUSTICE_SYSTEM),
+            HumanMessage(content=human_text),
+        ])
+        text = response.content if hasattr(response, "content") else str(response)
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"[ChiefJustice] LLM polish failed: {e}")
+        return None
+
+
 # ── LangGraph Node: Chief Justice ───────────────────────────────────
 
 
 def chief_justice(state: AgentState) -> Dict[str, Any]:
     """LangGraph node: Chief Justice (The Supreme Court).
 
-    Deterministic Python conflict resolution — NOT an LLM.
-    Applies all 5 synthesis rules and produces the final AuditReport.
+    **Hybrid (v0.4.0):**
+      - Deterministic Python rules for scoring (5 synthesis rules)
+      - LLM-enhanced executive summary and remediation plan generation
+      - Rubric-independent: handles any dimension set dynamically
 
     Returns:
         {"final_report": AuditReport}

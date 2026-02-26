@@ -90,6 +90,14 @@ repositories and PDF reports against a 10-dimension forensic rubric, producing
 structured Markdown audit reports with per-criterion scores, judicial arguments,
 dissent explanations, and remediation plans.
 
+Version~0.4.0 introduces a \textbf{hybrid LLM architecture}: deterministic Python
+tools remain the backbone for forensic evidence and scoring rules, while three
+LLM models (\texttt{deepseek-v3.1:671b-cloud} for heavy reasoning,
+\texttt{qwen3-coder:480b-cloud} for structured judicial output, and
+\texttt{Qwen2.5-VL-32B-Instruct} for multimodal vision) handle interpretation, dynamic rubric
+handling, and report polishing.  The system is now \textbf{rubric-independent}:
+adding new dimensions to \texttt{rubric.json} requires no code changes.
+
 \begin{table}[H]
 \centering
 \caption{Key Metrics}
@@ -138,17 +146,22 @@ Architectural Diagram Analysis   & 2/5 \\
 \subsection{System Overview}
 
 The Swarm Auditor implements a three-layer pipeline modelled as a LangGraph
-\texttt{StateGraph} with 12 real nodes and 2 conditional edges:
+\texttt{StateGraph} with 12 real nodes and 2 conditional edges.  Version~0.4.0
+augments the original purely-deterministic detective and chief justice layers
+with optional LLM passes:
 
-\begin{lstlisting}[language={},title={Pipeline Flow}]
+\begin{lstlisting}[language={},title={Pipeline Flow (v0.4.0)}]
 START
-  -> context_builder
-  -> [RepoInvestigator || DocAnalyst || VisionInspector]  (Detective Fan-Out)
-  -> evidence_aggregator                                   (Fan-In)
+  -> context_builder                   (loads rubric.json)
+  -> [RepoInvestigator || DocAnalyst   (Hybrid: deterministic + deepseek LLM
+     || VisionInspector]                fallback for unknown dimensions)
+  -> evidence_aggregator                (post-process cross-refs)
   -> (conditional: has_evidence?)
       YES -> judge_dispatcher
-             -> [Prosecutor || Defense || TechLead]        (Judicial Fan-Out)
-             -> chief_justice                               (Synthesis)
+             -> [Prosecutor || Defense  (LLM: qwen3-coder:480b-cloud
+                || TechLead]             structured output via Pydantic)
+             -> chief_justice            (Deterministic 5-rule scoring
+                                         + deepseek LLM report polish)
              -> (conditional: report_valid?)
                  YES -> END
                  NO  -> report_fallback -> END
@@ -180,7 +193,9 @@ different philosophical positions:
 Each judge receives the \emph{same} evidence bundle and produces a
 \texttt{JudicialOpinion} Pydantic object via \texttt{.with\_structured\_output()}.
 The Chief Justice then applies deterministic Python rules to resolve
-conflicts---never averaging, never invoking an LLM.
+conflicts---never averaging, never invoking an LLM for scoring.  An optional
+LLM pass (\texttt{deepseek-v3.1:671b-cloud}) polishes the executive summary
+and remediation plan \emph{after} all scores are finalised.
 
 The dialectical approach prevents single-perspective bias: a project that
 looks impressive to the Defense may harbour critical security flaws
@@ -190,13 +205,17 @@ the Prosecutor catches, while the Tech Lead grounds both in practical concerns.
 
 The graph implements \textbf{two distinct parallel fan-out / fan-in patterns}:
 
-\paragraph{Layer~1 --- Detective Fan-Out.}
+\paragraph{Layer~1 --- Detective Fan-Out (Hybrid v0.4.0).}
 \texttt{context\_builder} fans out to three detective nodes
 (\texttt{repo\_investigator}, \texttt{doc\_analyst}, \texttt{vision\_inspector}).
 All three run concurrently via LangGraph's parallel edge execution.  Each
 returns \texttt{\{dimension\_id: [Evidence]\}} dicts that merge into
 \texttt{AgentState["evidences"]} using the \texttt{operator.ior} reducer (dict
-merge without overwrite).
+merge without overwrite).  \textbf{Known dimensions} use fast deterministic Python
+tools; \textbf{unknown/dynamic dimensions} fall through to
+\texttt{deepseek-v3.1:671b-cloud} via \texttt{OLLAMA\_DETECTIVE\_MODEL}, using the
+rubric's \texttt{forensic\_instruction} field as the analysis prompt.  This makes
+the system fully \textbf{rubric-independent}.
 
 \paragraph{The Parallel State Challenge.}
 Since detectives run in parallel, \texttt{doc\_analyst} cannot see
@@ -211,7 +230,8 @@ flagged as ``hallucinated.''
 one-conditional-per-source constraint) fans out to three judge nodes.  Their
 outputs merge into \texttt{AgentState["opinions"]} via \texttt{operator.add}
 (list concatenation).  \texttt{chief\_justice} aggregates all 30 opinions
-and synthesises a final \texttt{AuditReport}.
+and synthesises a final \texttt{AuditReport} using deterministic rules, then
+optionally polishes the report text with \texttt{deepseek-v3.1:671b-cloud}.
 
 \subsection{Metacognition}
 
@@ -350,7 +370,7 @@ Without these reducers, parallel execution would cause
 
 \subsection{Data Flow Summary}
 
-\begin{lstlisting}[language={},title={Data Flow}]
+\begin{lstlisting}[language={},title={Data Flow (v0.4.0)}]
 Input: repo_url + pdf_path
          |
     context_builder (loads rubric.json -> 10 RubricDimension objects)
@@ -359,6 +379,9 @@ Input: repo_url + pdf_path
     v    v                v
   Repo  Doc            Vision
   Inv.  Analyst        Inspector
+  (det  (det           (Qwen2.5-VL
+  +llm   +llm           via HuggingFace)
+  fbk)   fbk)
     |    |                |
     +----+----+-----------+
               v
@@ -366,10 +389,11 @@ Input: repo_url + pdf_path
          |
     +----+----+
     v    v    v
-  Pros. Def. TechLead    (LLM judges)
+  Pros. Def. TechLead    (qwen3-coder:480b-cloud)
     +----+----+
          v
-   chief_justice          (deterministic rules)
+   chief_justice          (deterministic rules
+                           + deepseek report polish)
          |
          v
    AuditReport -> Markdown
@@ -539,12 +563,12 @@ and other edge cases.
 \subsection{Why Deterministic Chief Justice?}
 
 The rubric requires ``hardcoded deterministic conflict resolution rules.''
-Using an LLM would introduce non-deterministic scoring, risk the LLM
-ignoring security overrides, add latency and cost, and make the system
-harder to audit.  The Chief Justice applies 5 rules in fixed order:
+The Chief Justice applies 5 rules in fixed order:
 Security Override $\rightarrow$ Fact Supremacy $\rightarrow$ Functionality
 Weight $\rightarrow$ Variance Re-evaluation $\rightarrow$ Dissent
-Requirement.
+Requirement.  In v0.4.0, an optional LLM pass (\texttt{deepseek-v3.1:671b-cloud})
+polishes the report text \emph{after} all deterministic scores are locked.
+The LLM never modifies scores---only the executive summary and remediation plan.
 
 % ────────────────────────────────────────────────────────────
 \section{Technology Stack}
@@ -564,14 +588,16 @@ Schema Validation   & Pydantic            & 2.12.5 \\
 PDF Parsing         & PyMuPDF (fitz)      & 1.27.1 \\
 Frontend            & Streamlit           & 1.54.0 \\
 Observability       & LangSmith           & Enabled \\
-LLM Models          & Ollama              & qwen3, deepseek-v3.1, llava \\
+Judge Model         & Ollama              & qwen3-coder:480b-cloud \\
+Detective/CJ Model  & Ollama              & deepseek-v3.1:671b-cloud \\
+Vision Model        & Hugging Face        & Qwen2.5-VL-32B-Instruct \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \vfill
 \begin{center}
-\small\textit{Swarm Auditor v0.3.0 --- Built with LangGraph + Streamlit --- 10 Academy FDE Week 2}
+\small\textit{Swarm Auditor v0.4.0 --- Built with LangGraph + Streamlit --- 10 Academy FDE Week 2}
 \end{center}
 
 \end{document}

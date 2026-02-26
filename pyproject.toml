@@ -5,14 +5,18 @@ description = "Digital Courtroom — Deep LangGraph Swarms for Autonomous Code G
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "accelerate>=0.25.0",
     "langchain-core>=1.2.15",
     "langchain-ollama>=1.0.1",
     "langgraph>=1.0.9",
+    "Pillow>=10.0.0",
     "pydantic>=2.12.5",
     "pymupdf>=1.27.1",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.1",
     "streamlit>=1.54.0",
+    "torch>=2.0.0",
+    "transformers>=4.45.0",
 ]
 
 [tool.pytest.ini_options]
