@@ -838,6 +838,7 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
     found_judicial_schema = False
     found_retry = False
     judge_snippet = ""
+    structured_output_snippets: List[str] = []
 
     for fpath in judge_files:
         tree = _parse_file_ast(fpath)
@@ -845,11 +846,22 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
             continue
 
         source = fpath.read_text(encoding="utf-8", errors="replace")
+        source_lines = source.splitlines()
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr == "with_structured_output":
                     found_structured_output = True
+                    # Extract surrounding source lines as evidence snippet
+                    line_no = getattr(node, "lineno", 0)
+                    if line_no > 0:
+                        start = max(0, line_no - 4)
+                        end = min(len(source_lines), line_no + 3)
+                        snippet = "\n".join(source_lines[start:end])
+                        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+                        structured_output_snippets.append(
+                            f"# {rel_path}:{line_no}\n{snippet}"
+                        )
                     # Check if JudicialOpinion is the argument
                     for arg in node.args:
                         if isinstance(arg, ast.Name) and "Opinion" in arg.id:
@@ -877,6 +889,13 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
                         if isinstance(child, ast.Try):
                             found_retry = True
 
+    # Build snippet content for evidence
+    snippet_content = ""
+    if structured_output_snippets:
+        snippet_content = "\n\n## Code Snippets\n" + "\n\n".join(
+            f"```python\n{s}\n```" for s in structured_output_snippets
+        )
+
     evidences.append(
         Evidence(
             dimension_id="structured_output_enforcement",
@@ -885,6 +904,7 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
             content=(
                 f"with_structured_output: {found_structured_output}, "
                 f"bind_tools: {found_bind_tools}"
+                f"{snippet_content}"
             ),
             location="src/nodes/judges.py",
             rationale=(
@@ -935,31 +955,28 @@ def analyze_judicial_nuance(repo_path: Path) -> List[Evidence]:
     """Forensic Protocol: Judicial Nuance and Dialectics.
 
     Checks for distinct persona prompts — not shared/copied text.
+    Extracts actual system prompt content and computes pairwise overlap.
     """
     evidences: List[Evidence] = []
     py_files = _find_python_files(repo_path)
 
+    # --- 1. Detect persona references in judge/prompt files ---
     judge_files = [
         f for f in py_files if "judge" in f.stem.lower() or "judicial" in f.stem.lower()
     ]
-    if not judge_files:
-        judge_files = py_files
+    prompt_files = [
+        f for f in py_files if "prompt" in f.stem.lower()
+    ]
+    scan_files = list(set(judge_files + prompt_files)) or py_files
 
-    # Collect all string constants from judge files
     persona_strings: dict[str, List[str]] = {
         "Prosecutor": [],
         "Defense": [],
         "TechLead": [],
     }
 
-    for fpath in judge_files:
-        tree = _parse_file_ast(fpath)
-        if tree is None:
-            continue
-
+    for fpath in scan_files:
         source = fpath.read_text(encoding="utf-8", errors="replace").lower()
-
-        # Simple detection: look for persona keywords near string literals
         for persona in persona_strings:
             if persona.lower() in source:
                 persona_strings[persona].append(str(fpath))
@@ -989,6 +1006,99 @@ def analyze_judicial_nuance(repo_path: Path) -> List[Evidence]:
             confidence=0.8,
         )
     )
+
+    # --- 2. Extract actual system prompt text from prompt/judge files ---
+    prompt_texts: dict[str, str] = {}
+    prompt_var_map = {
+        "Prosecutor": ["PROSECUTOR_SYSTEM", "prosecutor_system", "prosecutor_prompt"],
+        "Defense": ["DEFENSE_SYSTEM", "defense_system", "defense_prompt"],
+        "TechLead": ["TECH_LEAD_SYSTEM", "tech_lead_system", "techlead_prompt"],
+    }
+
+    for fpath in scan_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+        source_lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+        source_full = fpath.read_text(encoding="utf-8", errors="replace")
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        for persona, var_names in prompt_var_map.items():
+                            if target.id in var_names:
+                                # Extract the string value
+                                if isinstance(node.value, ast.Constant) and isinstance(
+                                    node.value.value, str
+                                ):
+                                    prompt_texts[persona] = node.value.value
+
+    # --- 3. Compute pairwise prompt overlap ---
+    if len(prompt_texts) >= 2:
+        def _word_set(text: str) -> set:
+            return set(text.lower().split())
+
+        pairs = [("Prosecutor", "Defense"), ("Prosecutor", "TechLead"), ("Defense", "TechLead")]
+        overlap_results = []
+        collusion_detected = False
+
+        for a, b in pairs:
+            if a in prompt_texts and b in prompt_texts:
+                words_a = _word_set(prompt_texts[a])
+                words_b = _word_set(prompt_texts[b])
+                if words_a and words_b:
+                    intersection = words_a & words_b
+                    union = words_a | words_b
+                    jaccard = len(intersection) / len(union) if union else 0
+                    overlap_pct = jaccard * 100
+                    overlap_results.append(f"{a} vs {b}: {overlap_pct:.1f}% word overlap (Jaccard)")
+                    if overlap_pct > 50:
+                        collusion_detected = True
+
+        # Build evidence content with prompt excerpts
+        prompt_excerpts = []
+        for persona, text in prompt_texts.items():
+            excerpt = text.strip()[:500]
+            if len(text.strip()) > 500:
+                excerpt += "\n... [truncated]"
+            prompt_excerpts.append(f"### {persona} System Prompt\n```\n{excerpt}\n```")
+
+        overlap_content = "\n".join(overlap_results) if overlap_results else "Could not compute overlap"
+        excerpts_content = "\n\n".join(prompt_excerpts)
+
+        evidences.append(
+            Evidence(
+                dimension_id="judicial_nuance",
+                goal="Extract and compare persona prompt text (<50% overlap required)",
+                found=not collusion_detected and len(prompt_texts) >= 2,
+                content=(
+                    f"Prompt texts extracted for {len(prompt_texts)} personas.\n\n"
+                    f"## Pairwise Overlap Analysis\n{overlap_content}\n\n"
+                    f"## Prompt Excerpts\n{excerpts_content}"
+                ),
+                location="src/prompts.py",
+                rationale=(
+                    "Persona Collusion DETECTED — prompts share >50% word overlap."
+                    if collusion_detected
+                    else f"Distinct persona prompts confirmed with <50% pairwise overlap. "
+                    f"Extracted {len(prompt_texts)} system prompts with unique philosophies."
+                ),
+                confidence=0.95,
+            )
+        )
+    elif prompt_texts:
+        evidences.append(
+            Evidence(
+                dimension_id="judicial_nuance",
+                goal="Extract and compare persona prompt text (<50% overlap required)",
+                found=False,
+                content=f"Only found {len(prompt_texts)} prompt text(s); need at least 2 for comparison.",
+                location="src/prompts.py",
+                rationale="Insufficient prompt texts found for overlap comparison.",
+                confidence=0.5,
+            )
+        )
 
     return evidences
 
@@ -1034,9 +1144,19 @@ def analyze_chief_justice(repo_path: Path) -> List[Evidence]:
                 if "variance" in condition_dump or "variance" in source:
                     found_variance_check = True
 
-        # Check for markdown output
-        if "to_markdown" in source or ".md" in source or "markdown" in source:
+        # Check for markdown output (method calls like .to_markdown(), variables, etc.)
+        if "to_markdown" in source or "to_md" in source:
             found_markdown_output = True
+        # Also check AST for to_markdown method calls
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in (
+                "to_markdown", "to_md", "generate_markdown",
+            ):
+                found_markdown_output = True
+        # Fallback: check for .md file writes or markdown string patterns
+        if not found_markdown_output:
+            if ".md" in source or "markdown" in source:
+                found_markdown_output = True
 
         # Check for variance detection
         if "variance" in source:
