@@ -32,11 +32,16 @@ from src.tools.doc_tools import (
 )
 from src.tools.repo_tools import (
     analyze_chief_justice,
+    analyze_code_quality,
+    analyze_docstrings_and_types,
     analyze_git_forensics,
     analyze_graph_structure,
+    analyze_imports_and_dependencies,
     analyze_judicial_nuance,
+    analyze_security_patterns,
     analyze_state_definitions,
     analyze_structured_output,
+    analyze_test_coverage,
     analyze_tool_safety,
     clone_repo,
     list_repo_files,
@@ -318,6 +323,38 @@ def repo_investigator(state: AgentState) -> Dict[str, Any]:
                     evidences[dim.id] = _llm_analyze_repo_dimension(
                         dim, file_listing, file_contents_snippet, llm=detective_llm
                     )
+
+            # ── Supplementary evidence tools ──
+            # These add extra evidence to existing dimensions.
+            supplementary_map: Dict[str, List] = {
+                "safe_tool_engineering": [
+                    analyze_code_quality,
+                    analyze_test_coverage,
+                    analyze_security_patterns,
+                ],
+                "state_management_rigor": [
+                    analyze_imports_and_dependencies,
+                ],
+                "report_accuracy": [
+                    analyze_docstrings_and_types,
+                ],
+            }
+
+            for dim_id, tool_fns in supplementary_map.items():
+                # Only run if this dimension is in the rubric
+                if any(d.id == dim_id for d in repo_dims):
+                    for tool_fn in tool_fns:
+                        try:
+                            extra = tool_fn(repo_path)
+                            if dim_id in evidences:
+                                evidences[dim_id].extend(extra)
+                            else:
+                                evidences[dim_id] = extra
+                        except Exception as e:
+                            print(
+                                f"[RepoInvestigator] Supplementary tool "
+                                f"{tool_fn.__name__} failed: {e}"
+                            )
 
             # Store repo file list for cross-referencing by DocAnalyst
             evidences["_repo_file_list"] = [
