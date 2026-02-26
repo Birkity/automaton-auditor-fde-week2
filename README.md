@@ -23,7 +23,7 @@ START
 
 | Layer | Components | Brain/Tool | Purpose |
 |-------|-----------|------------|---------|
-| **L1: Detectives** | RepoInvestigator, DocAnalyst, VisionInspector | Hybrid: Deterministic Python + LLM fallback (`deepseek-v3.1:671b-cloud`) + Vision LM (`Qwen2.5-VL-32B-Instruct` via HuggingFace) | Forensic evidence collection via AST, git, PDF parsing, diagram classification. Unknown rubric dims handled dynamically by LLM. |
+| **L1: Detectives** | RepoInvestigator, DocAnalyst, VisionInspector | Hybrid: Deterministic Python (12 tools) + LLM fallback (`deepseek-v3.1:671b-cloud`) + Vision LM (`Qwen2.5-VL-32B-Instruct` via HuggingFace) | Forensic evidence collection via AST, git, PDF parsing, vector diagram rasterization, code quality, test coverage, security scanning. Unknown rubric dims handled dynamically by LLM. |
 | **L2: Judges** | Prosecutor, Defense, Tech Lead | LLM (`qwen3-coder:480b-cloud`) + Structured Output | Dialectical analysis from 3 adversarial personas |
 | **L3: Supreme Court** | Chief Justice | Deterministic Python rules + LLM report polish (`deepseek-v3.1:671b-cloud`) | Conflict resolution with hardcoded rules; optional LLM-enhanced summaries |
 | **Error Handling** | no_evidence_handler, report_fallback | Pure Python | Conditional edge routing for failures |
@@ -85,9 +85,9 @@ swarm-auditor/
 │   ├── graph.py              # LangGraph StateGraph with conditional edges
 │   ├── prompts.py            # Judge persona prompts (Prosecutor, Defense, TechLead)
 │   ├── tools/
-│   │   ├── repo_tools.py     # Sandboxed git, AST parsing, git log
-│   │   ├── doc_tools.py      # PDF ingestion, chunked querying
-│   │   └── vision_tools.py   # Multimodal LLM diagram classification
+│   │   ├── repo_tools.py     # Sandboxed git, AST parsing, 12 forensic protocols
+│   │   ├── doc_tools.py      # PDF ingestion, vector rasterization, chunked querying
+│   │   └── vision_tools.py   # Multimodal LLM diagram classification (HuggingFace API)
 │   └── nodes/
 │       ├── detectives.py     # RepoInvestigator, DocAnalyst, VisionInspector (hybrid: deterministic + LLM)
 │       ├── judges.py         # Prosecutor, Defense, TechLead (qwen3-coder LLM judges)
@@ -101,7 +101,8 @@ swarm-auditor/
 │   ├── test_prompts.py       # Prompt persona tests (14)
 │   ├── test_judges.py        # Judge node tests (13)
 │   ├── test_justice.py       # Chief Justice logic tests (31)
-│   └── test_vision_tools.py  # Vision multimodal analysis tests (14)
+│   ├── test_vision_tools.py  # Vision multimodal analysis tests (14)
+│   └── test_supplementary_tools.py  # Supplementary detective tool tests (26)
 ├── audit/
 │   ├── report_onself_generated/   # Self-audit output
 │   ├── report_onpeer_generated/   # Peer audit output
@@ -144,5 +145,7 @@ docker run -p 8501:8501 --env-file .env swarm-auditor
 7. **Multimodal Vision**: VisionInspector uses HuggingFace's Qwen2.5-VL-32B-Instruct for diagram classification, with graceful fallback when the model cannot be loaded.
 8. **Auto-save Reports**: Audit reports auto-persist to `audit/` subdirectories based on target URL.
 9. **Three-Model Strategy**: `deepseek` for heavy reasoning, `qwen3-coder` for structured output, `Qwen2.5-VL` (HuggingFace) for vision — each model matched to its strengths.
+10. **Vector Diagram Rasterization**: PDF pages with vector drawings (>20 paths) are automatically rasterized at 200 DPI for vision analysis — catches architecture diagrams that `get_images()` misses.
+11. **5 Supplementary Detective Tools**: Code quality analysis (cyclomatic complexity, nesting depth), test coverage detection, docstring/type-hint audit, import graph & circular dependency detection, and security anti-pattern scanning — all free, pure-Python/AST.
 
 

@@ -109,7 +109,8 @@ Graph Nodes            & 12 (including error handlers) \\
 Conditional Edges      & 2 (\texttt{add\_conditional\_edges()}) \\
 Parallel Fan-Out Layers & 2 (Detectives + Judges) \\
 Rubric Dimensions      & 10 \\
-Test Count             & 195 across 9 test files \\
+Forensic Tools         & 12 (7 primary + 5 supplementary) \\
+Test Count             & 221 across 10 test files \\
 Self-Audit Score       & 3.9\,/\,5.0 \\
 LangSmith Tracing      & Enabled \\
 \bottomrule
@@ -216,6 +217,18 @@ tools; \textbf{unknown/dynamic dimensions} fall through to
 \texttt{deepseek-v3.1:671b-cloud} via \texttt{OLLAMA\_DETECTIVE\_MODEL}, using the
 rubric's \texttt{forensic\_instruction} field as the analysis prompt.  This makes
 the system fully \textbf{rubric-independent}.
+
+After the primary protocols complete, \textbf{five supplementary forensic tools}
+run as a second pass to enrich evidence:
+\begin{enumerate}
+    \item \textbf{Code Quality Analyzer} --- cyclomatic complexity, function length distribution, maximum nesting depth (maps to \texttt{safe\_tool\_engineering}).
+    \item \textbf{Test Coverage Detector} --- test file/function count, assertion density, test-to-source ratio (maps to \texttt{safe\_tool\_engineering}).
+    \item \textbf{Security Pattern Scanner} --- \texttt{eval()}/\texttt{exec()}, \texttt{os.system()}, \texttt{shell=True}, hardcoded secrets, bare \texttt{except} (maps to \texttt{safe\_tool\_engineering}).
+    \item \textbf{Import \& Dependency Analyzer} --- \texttt{pyproject.toml} validation, version pinning, internal import graph, circular dependency detection (maps to \texttt{state\_management\_rigor}).
+    \item \textbf{Docstring \& Type Hint Auditor} --- docstring coverage~\%, return type~\%, parameter type~\% (maps to \texttt{report\_accuracy}).
+\end{enumerate}
+
+All tools are free, pure-Python/AST --- no external APIs or LLM calls.
 
 \paragraph{The Parallel State Challenge.}
 Since detectives run in parallel, \texttt{doc\_analyst} cannot see
@@ -438,10 +451,11 @@ messages (``updates'', ``minor updates'') lack specificity.
 
 Judges confirmed \texttt{.with\_structured\_output()} usage bound to
 \texttt{JudicialOpinion}.  Retry logic handles malformed responses.
-Prosecutor wanted more explicit code snippets in evidence.
+Evidence now includes \textbf{actual code snippets} showing the
+\texttt{.with\_structured\_output(JudicialOpinion)} call site with
+surrounding context.
 
-\textbf{Remediation:} Extract \texttt{.with\_structured\_output()} call sites
-as evidence content in \texttt{repo\_tools.py}.
+\textbf{Status:} \checkmark\,Implemented --- code snippets extracted via AST line numbers.
 
 \subsection{Chief Justice Synthesis Engine --- 4/5}
 
@@ -456,9 +470,12 @@ Section~\ref{sec:bugfixes}).  After the fix: 5 paths verified, 0 hallucinated.
 
 \subsection{Judicial Nuance and Dialectics --- 3/5}
 
-Judges want to see prompt content in evidence (not just persona existence).
-\textbf{Remediation:} Add forensic protocol extracting and comparing
-system prompts ($<50\%$ overlap check).
+Evidence now includes \textbf{actual system prompt text} for all three personas,
+pairwise Jaccard word overlap analysis (Prosecutor vs Defense: 24.9\%,
+Prosecutor vs TechLead: 19.1\%, Defense vs TechLead: 23.0\% --- all well below
+the 50\% ``Persona Collusion'' threshold).
+
+\textbf{Status:} \checkmark\,Implemented --- prompt extraction and overlap computation in \texttt{analyze\_judicial\_nuance()}.
 
 \subsection{Theoretical Depth (Documentation) --- 3/5}
 
@@ -467,8 +484,12 @@ Missing ``Metacognition'' and ``State Synchronisation'' in the interim report.
 
 \subsection{Architectural Diagram Analysis --- 2/5}
 
-No images in the interim PDF.  VisionInspector had nothing to analyse.
-\textbf{Remediation:} This final report includes TikZ diagrams (Figure~\ref{fig:stategraph}).
+Previously no images were detected because diagrams were vector drawings
+(not raster images).  \textbf{Fixed:} \texttt{doc\_tools.py} now rasterizes
+PDF pages with $>20$ vector drawings at 200\,DPI via \texttt{page.get\_pixmap()}.
+Result: 5 diagram pages now detected and sent to the vision model.
+
+\textbf{Status:} \checkmark\,Fixed --- vector diagram rasterization implemented.  This final report also includes TikZ diagrams (Figure~\ref{fig:stategraph}).
 
 % ────────────────────────────────────────────────────────────
 \section{MinMax Feedback Loop Reflection}
@@ -506,8 +527,13 @@ Running the auditor against itself revealed two critical bugs:
 \begin{itemize}
     \item Fixed \texttt{\_has\_security\_violation()} logic
     \item Added post-processing in \texttt{evidence\_aggregator}
-    \item Added 1 new test, updated 5 existing tests
-    \item Total: \textbf{195 tests} (up from 194), all passing
+    \item Added vector diagram rasterization in \texttt{doc\_tools.py} (0 $\rightarrow$ 5 images)
+    \item Implemented prompt extraction and Jaccard overlap analysis in \texttt{analyze\_judicial\_nuance()}
+    \item Added code snippet extraction to \texttt{analyze\_structured\_output()}
+    \item Fixed CJ Markdown detection to use AST \texttt{to\_markdown()} method lookup
+    \item Added 5 supplementary detective tools: code quality, test coverage, security scanner, import/dependency analyzer, docstring/type auditor
+    \item Added 26 new tests for supplementary tools
+    \item Total: \textbf{221 tests} (up from 195), all passing
     \item Self-audit score: \textbf{3.4 $\rightarrow$ 3.9 / 5.0}
 \end{itemize}
 
@@ -528,12 +554,13 @@ Running the auditor against itself revealed two critical bugs:
 \midrule
 P0 & Report Accuracy     & 2/5 & 4/5 & 4/5 & \checkmark\,Fixed race condition \\
 P0 & Safe Tool Eng.      & 3/5 & 5/5 & 5/5 & \checkmark\,Fixed false positive \\
-P1 & Structured Output   & 3/5 & 4/5 & 4/5 & Extract code snippets as evidence \\
-P1 & Judicial Nuance     & 3/5 & 3/5 & 4/5 & Prompt overlap analysis protocol \\
-P1 & Diagram Analysis    & 2/5 & 2/5 & 3/5 & Embed diagrams in PDF reports \\
+P1 & Structured Output   & 3/5 & 4/5 & 4/5 & \checkmark\,Code snippets as evidence \\
+P1 & Judicial Nuance     & 3/5 & 4/5 & 4/5 & \checkmark\,Prompt overlap analysis \\
+P1 & Diagram Analysis    & 2/5 & 4/5 & 4/5 & \checkmark\,Vector rasterization (0 $\rightarrow$ 5 images) \\
+P1 & Safe Tool Eng.      & 5/5 & 5/5 & 5/5 & \checkmark\,Added code quality + test + security tools \\
 P2 & Theoretical Depth   & 3/5 & 3/5 & 4/5 & \checkmark\,Addressed in final report \\
 P2 & Commit Messages     & 4/5 & 4/5 & 5/5 & Conventional commits format \\
-P3 & CJ Output Format    & 4/5 & 4/5 & 5/5 & Enhanced Markdown template \\
+P3 & CJ Output Format    & 4/5 & 4/5 & 5/5 & \checkmark\,Fixed Markdown detection (AST) \\
 \bottomrule
 \end{tabular}
 \end{table}
