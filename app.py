@@ -70,7 +70,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("🎯 Audit Target")
+    st.subheader("Audit Target")
     repo_url = st.text_input(
         "GitHub Repository URL",
         placeholder="https://github.com/user/repo",
@@ -191,7 +191,7 @@ if run_audit and repo_url:
 
     try:
         with st.status("⚖️ Running Full Audit Pipeline...", expanded=True) as status:
-            st.write("Compiling LangGraph StateGraph (9 nodes, 2 fan-out/fan-in layers)...")
+            st.write("Compiling LangGraph StateGraph (12 nodes, conditional edges)...")
             graph = compile_graph()
 
             st.write("Loading rubric dimensions (10 dimensions, v3.0.0)...")
@@ -231,7 +231,7 @@ if run_audit and repo_url:
 
 # ── Tabs ──
 tab_progress, tab_evidence, tab_report = st.tabs(
-    ["📊 Progress", "🔎 Evidence", "📋 Audit Report"]
+    ["Progress", "Evidence", "Audit Report"]
 )
 
 with tab_progress:
@@ -363,25 +363,36 @@ with tab_progress:
 
         # Show architecture diagram
         st.subheader("Architecture")
-        st.markdown("""
-```mermaid
-graph TD
-    START([START]) --> CB[context_builder]
-    CB --> RI[RepoInvestigator]
-    CB --> DA[DocAnalyst]
-    CB --> VI[VisionInspector]
-    RI --> EA[evidence_aggregator]
-    DA --> EA
-    VI --> EA
-    EA --> P[Prosecutor]
-    EA --> D[Defense]
-    EA --> TL[TechLead]
-    P --> CJ[ChiefJustice]
-    D --> CJ
-    TL --> CJ
-    CJ --> END([END])
-```
-""")
+        import streamlit.components.v1 as components
+        mermaid_html = """
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+        <script>mermaid.initialize({startOnLoad:true, theme:'dark'});</script>
+        <div style="overflow:auto; max-height:700px; border:1px solid #333; border-radius:8px; padding:16px;">
+        <div class="mermaid">
+        graph TD
+            START([START]) --> CB[context_builder]
+            CB --> RI[RepoInvestigator]
+            CB --> DA[DocAnalyst]
+            CB --> VI[VisionInspector]
+            RI --> EA[evidence_aggregator]
+            DA --> EA
+            VI --> EA
+            EA -.->|has evidence| JD[judge_dispatcher]
+            EA -.->|no evidence| NEH[no_evidence_handler]
+            JD --> P[Prosecutor]
+            JD --> D[Defense]
+            JD --> TL[TechLead]
+            P --> CJ[ChiefJustice]
+            D --> CJ
+            TL --> CJ
+            CJ -.->|valid| END([END])
+            CJ -.->|degraded| RF[report_fallback]
+            NEH --> END
+            RF --> END
+        </div>
+        </div>
+        """
+        components.html(mermaid_html, height=750, scrolling=True)
 
 with tab_evidence:
     if st.session_state.audit_result:
@@ -396,7 +407,7 @@ with tab_evidence:
             dim_names = {}
 
         # Sub-tabs for evidence vs opinions
-        ev_tab, op_tab = st.tabs(["🔬 Forensic Evidence", "⚖️ Judicial Opinions"])
+        ev_tab, op_tab = st.tabs(["Forensic Evidence", "Judicial Opinions"])
 
         with ev_tab:
             for dim_id, ev_list in sorted(evidences.items()):
@@ -481,7 +492,7 @@ with tab_report:
         # Download button
         md_content = report.to_markdown()
         st.download_button(
-            label="📥 Download Report (Markdown)",
+            label="Download Report (Markdown)",
             data=md_content,
             file_name="audit_report.md",
             mime="text/markdown",
@@ -494,6 +505,6 @@ with tab_report:
 # ── Footer ──
 st.divider()
 st.caption(
-    "Swarm Auditor v0.2.0 | Built with LangGraph + Streamlit | "
+    "Swarm Auditor v0.4.0 | Built with LangGraph + Streamlit | "
     "FDE Challenge Week 2: The Automaton Auditor"
 )

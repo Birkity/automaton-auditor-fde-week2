@@ -1,5 +1,5 @@
 """
-Tests for src/nodes/chief_justice.py — Deterministic conflict resolution.
+Tests for src/nodes/justice.py — Deterministic conflict resolution.
 
 NO mocking needed — the Chief Justice is pure Python logic.
 Tests verify all 5 synthesis rules from rubric.json.
@@ -11,7 +11,7 @@ from typing import Dict, List
 
 import pytest
 
-from src.nodes.chief_justice import (
+from src.nodes.justice import (
     SECURITY_CAP,
     VARIANCE_THRESHOLD,
     _build_audit_report,
@@ -114,9 +114,10 @@ class TestGroupOpinions:
 
 class TestSecurityViolation:
     def test_detects_os_system(self):
+        # In repo_tools, found=False when os.system IS detected (violation)
         evs = {
             "safe_tool_engineering": [
-                _ev("safe_tool_engineering", True, "Found os.system() usage")
+                _ev("safe_tool_engineering", False, "os.system() usage detected")
             ]
         }
         assert _has_security_violation(evs) is True
@@ -124,12 +125,22 @@ class TestSecurityViolation:
     def test_detects_shell_true(self):
         evs = {
             "safe_tool_engineering": [
-                _ev("safe_tool_engineering", True, "subprocess.run(..., shell=True)")
+                _ev("safe_tool_engineering", False, "subprocess.run(..., shell=True)")
+            ]
+        }
+        assert _has_security_violation(evs) is True
+
+    def test_detects_explicit_violation_banner(self):
+        # The "SECURITY VIOLATION" prefix always triggers regardless of found flag
+        evs = {
+            "safe_tool_engineering": [
+                _ev("safe_tool_engineering", True, "SECURITY VIOLATION: os.system at line 42")
             ]
         }
         assert _has_security_violation(evs) is True
 
     def test_no_violation_when_clean(self):
+        # found=True means safe, content doesn't contain violation markers in a failure context
         evs = {
             "safe_tool_engineering": [
                 _ev("safe_tool_engineering", True, "Uses tempfile and subprocess.run safely")
@@ -137,10 +148,11 @@ class TestSecurityViolation:
         }
         assert _has_security_violation(evs) is False
 
-    def test_no_violation_when_not_found(self):
+    def test_no_violation_when_safe_report_mentions_os_system(self):
+        # found=True (safe) + content mentioning os.system should NOT trigger
         evs = {
             "safe_tool_engineering": [
-                _ev("safe_tool_engineering", False, "os.system check")
+                _ev("safe_tool_engineering", True, "No os.system() calls detected")
             ]
         }
         assert _has_security_violation(evs) is False
@@ -483,13 +495,14 @@ class TestChiefJusticeNode:
         assert result["final_report"].overall_score == 1.0
 
     def test_security_violation_detected_and_applied(self, dim_safety):
+        # In repo_tools: found=False when os.system IS found (violation exists)
         state = {
             "repo_url": "https://github.com/test/repo",
             "pdf_path": "",
             "rubric_dimensions": [dim_safety],
             "evidences": {
                 "safe_tool_engineering": [
-                    _ev("safe_tool_engineering", True, "Found os.system() usage")
+                    _ev("safe_tool_engineering", False, "os.system() usage detected")
                 ]
             },
             "opinions": [

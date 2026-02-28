@@ -838,6 +838,7 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
     found_judicial_schema = False
     found_retry = False
     judge_snippet = ""
+    structured_output_snippets: List[str] = []
 
     for fpath in judge_files:
         tree = _parse_file_ast(fpath)
@@ -845,11 +846,22 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
             continue
 
         source = fpath.read_text(encoding="utf-8", errors="replace")
+        source_lines = source.splitlines()
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr == "with_structured_output":
                     found_structured_output = True
+                    # Extract surrounding source lines as evidence snippet
+                    line_no = getattr(node, "lineno", 0)
+                    if line_no > 0:
+                        start = max(0, line_no - 4)
+                        end = min(len(source_lines), line_no + 3)
+                        snippet = "\n".join(source_lines[start:end])
+                        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+                        structured_output_snippets.append(
+                            f"# {rel_path}:{line_no}\n{snippet}"
+                        )
                     # Check if JudicialOpinion is the argument
                     for arg in node.args:
                         if isinstance(arg, ast.Name) and "Opinion" in arg.id:
@@ -877,6 +889,13 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
                         if isinstance(child, ast.Try):
                             found_retry = True
 
+    # Build snippet content for evidence
+    snippet_content = ""
+    if structured_output_snippets:
+        snippet_content = "\n\n## Code Snippets\n" + "\n\n".join(
+            f"```python\n{s}\n```" for s in structured_output_snippets
+        )
+
     evidences.append(
         Evidence(
             dimension_id="structured_output_enforcement",
@@ -885,6 +904,7 @@ def analyze_structured_output(repo_path: Path) -> List[Evidence]:
             content=(
                 f"with_structured_output: {found_structured_output}, "
                 f"bind_tools: {found_bind_tools}"
+                f"{snippet_content}"
             ),
             location="src/nodes/judges.py",
             rationale=(
@@ -935,31 +955,28 @@ def analyze_judicial_nuance(repo_path: Path) -> List[Evidence]:
     """Forensic Protocol: Judicial Nuance and Dialectics.
 
     Checks for distinct persona prompts — not shared/copied text.
+    Extracts actual system prompt content and computes pairwise overlap.
     """
     evidences: List[Evidence] = []
     py_files = _find_python_files(repo_path)
 
+    # --- 1. Detect persona references in judge/prompt files ---
     judge_files = [
         f for f in py_files if "judge" in f.stem.lower() or "judicial" in f.stem.lower()
     ]
-    if not judge_files:
-        judge_files = py_files
+    prompt_files = [
+        f for f in py_files if "prompt" in f.stem.lower()
+    ]
+    scan_files = list(set(judge_files + prompt_files)) or py_files
 
-    # Collect all string constants from judge files
     persona_strings: dict[str, List[str]] = {
         "Prosecutor": [],
         "Defense": [],
         "TechLead": [],
     }
 
-    for fpath in judge_files:
-        tree = _parse_file_ast(fpath)
-        if tree is None:
-            continue
-
+    for fpath in scan_files:
         source = fpath.read_text(encoding="utf-8", errors="replace").lower()
-
-        # Simple detection: look for persona keywords near string literals
         for persona in persona_strings:
             if persona.lower() in source:
                 persona_strings[persona].append(str(fpath))
@@ -989,6 +1006,98 @@ def analyze_judicial_nuance(repo_path: Path) -> List[Evidence]:
             confidence=0.8,
         )
     )
+
+    # --- 2. Extract actual system prompt text from prompt/judge files ---
+    prompt_texts: dict[str, str] = {}
+    prompt_var_map = {
+        "Prosecutor": ["PROSECUTOR_SYSTEM", "prosecutor_system", "prosecutor_prompt"],
+        "Defense": ["DEFENSE_SYSTEM", "defense_system", "defense_prompt"],
+        "TechLead": ["TECH_LEAD_SYSTEM", "tech_lead_system", "techlead_prompt"],
+    }
+
+    for fpath in scan_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+        source_lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        for persona, var_names in prompt_var_map.items():
+                            if target.id in var_names:
+                                # Extract the string value
+                                if isinstance(node.value, ast.Constant) and isinstance(
+                                    node.value.value, str
+                                ):
+                                    prompt_texts[persona] = node.value.value
+
+    # --- 3. Compute pairwise prompt overlap ---
+    if len(prompt_texts) >= 2:
+        def _word_set(text: str) -> set:
+            return set(text.lower().split())
+
+        pairs = [("Prosecutor", "Defense"), ("Prosecutor", "TechLead"), ("Defense", "TechLead")]
+        overlap_results = []
+        collusion_detected = False
+
+        for a, b in pairs:
+            if a in prompt_texts and b in prompt_texts:
+                words_a = _word_set(prompt_texts[a])
+                words_b = _word_set(prompt_texts[b])
+                if words_a and words_b:
+                    intersection = words_a & words_b
+                    union = words_a | words_b
+                    jaccard = len(intersection) / len(union) if union else 0
+                    overlap_pct = jaccard * 100
+                    overlap_results.append(f"{a} vs {b}: {overlap_pct:.1f}% word overlap (Jaccard)")
+                    if overlap_pct > 50:
+                        collusion_detected = True
+
+        # Build evidence content with prompt excerpts
+        prompt_excerpts = []
+        for persona, text in prompt_texts.items():
+            excerpt = text.strip()[:500]
+            if len(text.strip()) > 500:
+                excerpt += "\n... [truncated]"
+            prompt_excerpts.append(f"### {persona} System Prompt\n```\n{excerpt}\n```")
+
+        overlap_content = "\n".join(overlap_results) if overlap_results else "Could not compute overlap"
+        excerpts_content = "\n\n".join(prompt_excerpts)
+
+        evidences.append(
+            Evidence(
+                dimension_id="judicial_nuance",
+                goal="Extract and compare persona prompt text (<50% overlap required)",
+                found=not collusion_detected and len(prompt_texts) >= 2,
+                content=(
+                    f"Prompt texts extracted for {len(prompt_texts)} personas.\n\n"
+                    f"## Pairwise Overlap Analysis\n{overlap_content}\n\n"
+                    f"## Prompt Excerpts\n{excerpts_content}"
+                ),
+                location="src/prompts.py",
+                rationale=(
+                    "Persona Collusion DETECTED — prompts share >50% word overlap."
+                    if collusion_detected
+                    else f"Distinct persona prompts confirmed with <50% pairwise overlap. "
+                    f"Extracted {len(prompt_texts)} system prompts with unique philosophies."
+                ),
+                confidence=0.95,
+            )
+        )
+    elif prompt_texts:
+        evidences.append(
+            Evidence(
+                dimension_id="judicial_nuance",
+                goal="Extract and compare persona prompt text (<50% overlap required)",
+                found=False,
+                content=f"Only found {len(prompt_texts)} prompt text(s); need at least 2 for comparison.",
+                location="src/prompts.py",
+                rationale="Insufficient prompt texts found for overlap comparison.",
+                confidence=0.5,
+            )
+        )
 
     return evidences
 
@@ -1034,9 +1143,19 @@ def analyze_chief_justice(repo_path: Path) -> List[Evidence]:
                 if "variance" in condition_dump or "variance" in source:
                     found_variance_check = True
 
-        # Check for markdown output
-        if "to_markdown" in source or ".md" in source or "markdown" in source:
+        # Check for markdown output (method calls like .to_markdown(), variables, etc.)
+        if "to_markdown" in source or "to_md" in source:
             found_markdown_output = True
+        # Also check AST for to_markdown method calls
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in (
+                "to_markdown", "to_md", "generate_markdown",
+            ):
+                found_markdown_output = True
+        # Fallback: check for .md file writes or markdown string patterns
+        if not found_markdown_output:
+            if ".md" in source or "markdown" in source:
+                found_markdown_output = True
 
         # Check for variance detection
         if "variance" in source:
@@ -1081,7 +1200,723 @@ def analyze_chief_justice(repo_path: Path) -> List[Evidence]:
     return evidences
 
 
-# ── File existence helper (used by DocAnalyst cross-reference) ──────
+# ── Supplementary Detective Tools ───────────────────────────────────
+# These generate additional evidence for existing dimensions.
+# They are free, pure-Python/AST tools — no external APIs needed.
+# ────────────────────────────────────────────────────────────────────
+
+
+def analyze_code_quality(repo_path: Path) -> List[Evidence]:
+    """Supplementary forensic tool: Code Quality Analysis.
+
+    AST-based analysis of:
+      - Cyclomatic complexity (per-function)
+      - Function length distribution
+      - Class count and method density
+      - Maximum nesting depth
+    """
+    evidences: List[Evidence] = []
+    py_files = _find_python_files(repo_path)
+
+    total_functions = 0
+    total_classes = 0
+    long_functions: List[str] = []  # functions > 50 lines
+    complex_functions: List[str] = []  # high cyclomatic complexity
+    max_nesting = 0
+    total_lines = 0
+    function_lengths: List[int] = []
+
+    for fpath in py_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+
+        source = fpath.read_text(encoding="utf-8", errors="replace")
+        total_lines += len(source.splitlines())
+        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                total_functions += 1
+                # Function length
+                end_line = getattr(node, "end_lineno", node.lineno)
+                length = end_line - node.lineno + 1
+                function_lengths.append(length)
+                if length > 50:
+                    long_functions.append(
+                        f"{rel_path}:{node.lineno} {node.name}() — {length} lines"
+                    )
+
+                # Cyclomatic complexity: count decision points
+                complexity = 1  # base
+                for child in ast.walk(node):
+                    if isinstance(child, (ast.If, ast.While, ast.For)):
+                        complexity += 1
+                    elif isinstance(child, ast.BoolOp):
+                        complexity += len(child.values) - 1
+                    elif isinstance(child, ast.ExceptHandler):
+                        complexity += 1
+                    elif isinstance(child, ast.Assert):
+                        complexity += 1
+                if complexity > 10:
+                    complex_functions.append(
+                        f"{rel_path}:{node.lineno} {node.name}() — complexity={complexity}"
+                    )
+
+                # Nesting depth
+                depth = _max_nesting_depth(node)
+                max_nesting = max(max_nesting, depth)
+
+            elif isinstance(node, ast.ClassDef):
+                total_classes += 1
+
+    avg_func_len = (
+        sum(function_lengths) / len(function_lengths) if function_lengths else 0
+    )
+
+    # Build summary
+    summary_parts = [
+        f"Total Python files: {len(py_files)}",
+        f"Total lines of code: {total_lines}",
+        f"Total functions/methods: {total_functions}",
+        f"Total classes: {total_classes}",
+        f"Average function length: {avg_func_len:.1f} lines",
+        f"Maximum nesting depth: {max_nesting}",
+        f"Functions > 50 lines: {len(long_functions)}",
+        f"Functions with complexity > 10: {len(complex_functions)}",
+    ]
+
+    if long_functions:
+        summary_parts.append("\n## Long Functions (>50 lines)")
+        summary_parts.extend(f"- {f}" for f in long_functions[:10])
+
+    if complex_functions:
+        summary_parts.append("\n## High Complexity Functions (>10)")
+        summary_parts.extend(f"- {f}" for f in complex_functions[:10])
+
+    quality_score = "good"
+    if len(complex_functions) > 5 or max_nesting > 6:
+        quality_score = "needs improvement"
+    elif len(long_functions) > 10:
+        quality_score = "moderate"
+
+    evidences.append(
+        Evidence(
+            dimension_id="safe_tool_engineering",
+            goal="Assess code quality: complexity, function length, nesting depth",
+            found=quality_score == "good",
+            content="\n".join(summary_parts),
+            location="Repository-wide",
+            rationale=(
+                f"Code quality assessment: {quality_score}. "
+                f"{len(py_files)} files, {total_functions} functions, "
+                f"avg {avg_func_len:.1f} lines/function, "
+                f"max nesting depth {max_nesting}."
+            ),
+            confidence=0.9,
+        )
+    )
+
+    return evidences
+
+
+def _max_nesting_depth(node: ast.AST, current: int = 0) -> int:
+    """Compute maximum nesting depth of control-flow statements."""
+    max_depth = current
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+            max_depth = max(max_depth, _max_nesting_depth(child, current + 1))
+        else:
+            max_depth = max(max_depth, _max_nesting_depth(child, current))
+    return max_depth
+
+
+def analyze_test_coverage(repo_path: Path) -> List[Evidence]:
+    """Supplementary forensic tool: Test Coverage Detection.
+
+    Scans the test directory for:
+      - Number of test files
+      - Number of test functions (test_* and Test* classes)
+      - Assertion density (asserts per test)
+      - Test-to-source-code ratio
+      - What modules are tested vs. untested
+    """
+    evidences: List[Evidence] = []
+
+    # Find test files
+    test_dirs = ["tests", "test", "Tests"]
+    test_files: List[Path] = []
+    for td in test_dirs:
+        test_dir = repo_path / td
+        if test_dir.exists():
+            test_files.extend(test_dir.rglob("*.py"))
+    # Also include any test_*.py at root
+    test_files.extend(repo_path.glob("test_*.py"))
+    test_files = list(set(test_files))
+
+    # Find source files
+    src_files = _find_python_files(repo_path)
+    src_files = [f for f in src_files if not any(
+        td in str(f).replace("\\", "/") for td in test_dirs
+    )]
+
+    total_test_functions = 0
+    total_test_classes = 0
+    total_assertions = 0
+    tested_modules: set = set()
+    test_file_details: List[str] = []
+
+    for fpath in test_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+
+        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+        func_count = 0
+        assert_count = 0
+
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                total_test_functions += 1
+                func_count += 1
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                total_test_classes += 1
+                # Count test methods in class
+                for child in node.body:
+                    if isinstance(child, ast.FunctionDef) and child.name.startswith(
+                        "test_"
+                    ):
+                        total_test_functions += 1
+                        func_count += 1
+
+        # Count assertions across the whole file
+        for node in ast.walk(tree):
+            # Count assertions
+            if isinstance(node, ast.Assert):
+                total_assertions += 1
+                assert_count += 1
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute) and node.func.attr.startswith(
+                    "assert"
+                ):
+                    total_assertions += 1
+                    assert_count += 1
+                elif isinstance(node.func, ast.Name) and node.func.id in (
+                    "assert_that",
+                    "assertEqual",
+                    "assertTrue",
+                    "assertFalse",
+                ):
+                    total_assertions += 1
+                    assert_count += 1
+
+        test_file_details.append(f"- {rel_path}: {func_count} tests, {assert_count} assertions")
+
+        # Detect which module is tested by checking imports
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                tested_modules.add(node.module)
+
+    # Compute source LOC
+    src_loc = 0
+    test_loc = 0
+    for f in src_files:
+        try:
+            src_loc += len(f.read_text(errors="replace").splitlines())
+        except Exception:
+            pass
+    for f in test_files:
+        try:
+            test_loc += len(f.read_text(errors="replace").splitlines())
+        except Exception:
+            pass
+
+    test_ratio = test_loc / src_loc if src_loc > 0 else 0
+    avg_assertions = (
+        total_assertions / total_test_functions if total_test_functions > 0 else 0
+    )
+
+    # Determine which source modules lack tests
+    src_module_names = set()
+    for f in src_files:
+        rel = str(f.relative_to(repo_path)).replace("\\", "/").replace("/", ".")
+        if rel.endswith(".py"):
+            rel = rel[:-3]
+        src_module_names.add(rel)
+
+    summary_parts = [
+        f"Test files: {len(test_files)}",
+        f"Test classes: {total_test_classes}",
+        f"Test functions: {total_test_functions}",
+        f"Total assertions: {total_assertions}",
+        f"Avg assertions/test: {avg_assertions:.1f}",
+        f"Source LOC: {src_loc}, Test LOC: {test_loc}",
+        f"Test-to-source ratio: {test_ratio:.2f}",
+        f"Modules with test imports: {len(tested_modules)}",
+    ]
+
+    if test_file_details:
+        summary_parts.append("\n## Test File Breakdown")
+        summary_parts.extend(test_file_details[:15])
+
+    has_tests = total_test_functions > 0
+    good_coverage = test_ratio >= 0.3 and total_test_functions >= 10
+
+    evidences.append(
+        Evidence(
+            dimension_id="safe_tool_engineering",
+            goal="Assess test coverage: test count, assertion density, test-to-code ratio",
+            found=good_coverage,
+            content="\n".join(summary_parts),
+            location="tests/",
+            rationale=(
+                f"{'Solid' if good_coverage else 'Weak'} test infrastructure: "
+                f"{total_test_functions} test functions, "
+                f"{total_assertions} assertions, "
+                f"test/source ratio {test_ratio:.2f}."
+            ),
+            confidence=0.95 if has_tests else 0.5,
+        )
+    )
+
+    return evidences
+
+
+def analyze_docstrings_and_types(repo_path: Path) -> List[Evidence]:
+    """Supplementary forensic tool: Docstring & Type Annotation Audit.
+
+    Checks:
+      - Percentage of functions/classes with docstrings
+      - Percentage of functions with return type annotations
+      - Percentage of function parameters with type annotations
+      - Module-level docstring presence
+    """
+    evidences: List[Evidence] = []
+    py_files = _find_python_files(repo_path)
+
+    total_funcs = 0
+    funcs_with_docstring = 0
+    funcs_with_return_type = 0
+    params_total = 0
+    params_typed = 0
+    classes_total = 0
+    classes_with_docstring = 0
+    modules_with_docstring = 0
+    undocumented_funcs: List[str] = []
+
+    for fpath in py_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+
+        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+
+        # Module docstring
+        if (
+            tree.body
+            and isinstance(tree.body[0], ast.Expr)
+            and isinstance(tree.body[0].value, ast.Constant)
+            and isinstance(tree.body[0].value.value, str)
+        ):
+            modules_with_docstring += 1
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Skip dunder methods and private helpers for docstring check
+                total_funcs += 1
+
+                # Docstring check
+                has_docstring = (
+                    node.body
+                    and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)
+                )
+                if has_docstring:
+                    funcs_with_docstring += 1
+                elif not node.name.startswith("_"):
+                    undocumented_funcs.append(f"{rel_path}:{node.lineno} {node.name}()")
+
+                # Return type annotation
+                if node.returns is not None:
+                    funcs_with_return_type += 1
+
+                # Parameter type annotations
+                for arg in node.args.args:
+                    if arg.arg == "self":
+                        continue
+                    params_total += 1
+                    if arg.annotation is not None:
+                        params_typed += 1
+
+            elif isinstance(node, ast.ClassDef):
+                classes_total += 1
+                has_docstring = (
+                    node.body
+                    and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)
+                )
+                if has_docstring:
+                    classes_with_docstring += 1
+
+    doc_pct = (funcs_with_docstring / total_funcs * 100) if total_funcs > 0 else 0
+    return_pct = (funcs_with_return_type / total_funcs * 100) if total_funcs > 0 else 0
+    param_pct = (params_typed / params_total * 100) if params_total > 0 else 0
+    class_doc_pct = (
+        classes_with_docstring / classes_total * 100 if classes_total > 0 else 0
+    )
+    module_doc_pct = (
+        modules_with_docstring / len(py_files) * 100 if py_files else 0
+    )
+
+    summary_parts = [
+        f"Module docstring coverage: {modules_with_docstring}/{len(py_files)} ({module_doc_pct:.0f}%)",
+        f"Class docstring coverage: {classes_with_docstring}/{classes_total} ({class_doc_pct:.0f}%)",
+        f"Function docstring coverage: {funcs_with_docstring}/{total_funcs} ({doc_pct:.0f}%)",
+        f"Return type annotation coverage: {funcs_with_return_type}/{total_funcs} ({return_pct:.0f}%)",
+        f"Parameter type annotation coverage: {params_typed}/{params_total} ({param_pct:.0f}%)",
+    ]
+
+    if undocumented_funcs:
+        summary_parts.append(f"\n## Public functions missing docstrings ({len(undocumented_funcs)})")
+        summary_parts.extend(f"- {f}" for f in undocumented_funcs[:15])
+        if len(undocumented_funcs) > 15:
+            summary_parts.append(f"  ... and {len(undocumented_funcs) - 15} more")
+
+    good_docs = doc_pct >= 60 and return_pct >= 40
+
+    evidences.append(
+        Evidence(
+            dimension_id="report_accuracy",
+            goal="Audit docstring and type annotation coverage across codebase",
+            found=good_docs,
+            content="\n".join(summary_parts),
+            location="Repository-wide",
+            rationale=(
+                f"Documentation quality: {doc_pct:.0f}% functions documented, "
+                f"{return_pct:.0f}% have return types, "
+                f"{param_pct:.0f}% params typed. "
+                + (
+                    "Good documentation practice."
+                    if good_docs
+                    else "Documentation coverage needs improvement."
+                )
+            ),
+            confidence=0.9,
+        )
+    )
+
+    return evidences
+
+
+def analyze_imports_and_dependencies(repo_path: Path) -> List[Evidence]:
+    """Supplementary forensic tool: Import & Dependency Analysis.
+
+    Checks:
+      - Parses pyproject.toml for dependency management
+      - Builds internal import graph
+      - Detects circular imports
+      - Checks for version pinning
+    """
+    evidences: List[Evidence] = []
+    py_files = _find_python_files(repo_path)
+
+    # ── 1. Dependency management (pyproject.toml) ──
+    pyproject_path = repo_path / "pyproject.toml"
+    deps_info: List[str] = []
+    has_pyproject = pyproject_path.exists()
+    pinned_count = 0
+    unpinned_count = 0
+    total_deps = 0
+
+    if has_pyproject:
+        try:
+            content = pyproject_path.read_text(encoding="utf-8", errors="replace")
+            # Simple TOML parsing for dependencies
+            in_deps = False
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[") and "dependencies" in stripped.lower():
+                    in_deps = True
+                    continue
+                elif stripped.startswith("["):
+                    in_deps = False
+                    continue
+                if in_deps and stripped and not stripped.startswith("#"):
+                    # Check for version specifier
+                    if stripped.startswith('"') or stripped.startswith("'"):
+                        dep = stripped.strip("\"',")
+                    else:
+                        dep = stripped.split("=")[-1].strip().strip("\"'[]")
+                    if dep and not dep.startswith("["):
+                        total_deps += 1
+                        if any(op in dep for op in [">=", "<=", "==", "~=", "^"]):
+                            pinned_count += 1
+                        else:
+                            unpinned_count += 1
+                        deps_info.append(f"  {dep}")
+        except Exception:
+            pass
+
+    # Also check for uv.lock or requirements.txt
+    has_lockfile = (repo_path / "uv.lock").exists() or (
+        repo_path / "requirements.txt"
+    ).exists()
+
+    evidences.append(
+        Evidence(
+            dimension_id="state_management_rigor",
+            goal="Verify dependency management: pyproject.toml, pinning, lockfile",
+            found=has_pyproject and has_lockfile,
+            content=(
+                f"pyproject.toml: {'found' if has_pyproject else 'MISSING'}\n"
+                f"Lockfile (uv.lock/requirements.txt): {'found' if has_lockfile else 'MISSING'}\n"
+                f"Total dependencies: {total_deps}\n"
+                f"Version-pinned: {pinned_count}, Unpinned: {unpinned_count}\n"
+                + ("\n## Dependencies\n" + "\n".join(deps_info[:30]) if deps_info else "")
+            ),
+            location="pyproject.toml",
+            rationale=(
+                f"Dependency management: pyproject.toml {'present' if has_pyproject else 'absent'}, "
+                f"lockfile {'present' if has_lockfile else 'absent'}, "
+                f"{pinned_count}/{total_deps} deps version-pinned."
+            ),
+            confidence=0.9,
+        )
+    )
+
+    # ── 2. Internal import graph & circular import detection ──
+    # Build adjacency list of module-to-module imports
+    module_graph: Dict[str, set] = {}
+
+    for fpath in py_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+
+        rel = str(fpath.relative_to(repo_path)).replace("\\", "/")
+        module_name = rel.replace("/", ".").removesuffix(".py")
+        if module_name not in module_graph:
+            module_graph[module_name] = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                # Only track internal imports
+                if node.module.startswith("src") or node.module.startswith("."):
+                    module_graph[module_name].add(node.module)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("src"):
+                        module_graph[module_name].add(alias.name)
+
+    # Detect cycles using DFS
+    cycles: List[List[str]] = []
+
+    def _find_cycles(node: str, path: List[str], visited: set):
+        if node in path:
+            cycle_start = path.index(node)
+            cycles.append(path[cycle_start:] + [node])
+            return
+        if node in visited:
+            return
+        visited.add(node)
+        path.append(node)
+        for neighbor in module_graph.get(node, set()):
+            _find_cycles(neighbor, path[:], visited)
+
+    visited_global: set = set()
+    for mod in module_graph:
+        if mod not in visited_global:
+            _find_cycles(mod, [], visited_global)
+
+    graph_summary = [
+        f"Internal modules: {len(module_graph)}",
+        f"Import edges: {sum(len(v) for v in module_graph.values())}",
+        f"Circular imports detected: {len(cycles)}",
+    ]
+
+    if cycles:
+        graph_summary.append("\n## Circular Import Chains")
+        for cycle in cycles[:5]:
+            graph_summary.append(f"- {' -> '.join(cycle)}")
+
+    # Top-level dependency graph
+    if module_graph:
+        graph_summary.append("\n## Import Graph (top connections)")
+        sorted_modules = sorted(
+            module_graph.items(), key=lambda x: len(x[1]), reverse=True
+        )
+        for mod, deps in sorted_modules[:10]:
+            if deps:
+                graph_summary.append(f"- {mod} imports: {', '.join(sorted(deps))}")
+
+    evidences.append(
+        Evidence(
+            dimension_id="state_management_rigor",
+            goal="Analyze internal import graph and detect circular dependencies",
+            found=len(cycles) == 0,
+            content="\n".join(graph_summary),
+            location="Repository-wide",
+            rationale=(
+                f"Import graph: {len(module_graph)} modules, "
+                f"{sum(len(v) for v in module_graph.values())} edges. "
+                + (
+                    "No circular imports detected — clean dependency graph."
+                    if not cycles
+                    else f"{len(cycles)} circular import(s) found — architectural concern."
+                )
+            ),
+            confidence=0.85,
+        )
+    )
+
+    return evidences
+
+
+def analyze_security_patterns(repo_path: Path) -> List[Evidence]:
+    """Supplementary forensic tool: Security Anti-Pattern Scanner.
+
+    Scans for:
+      - eval() / exec() / compile() calls
+      - pickle.load() / yaml.load() without SafeLoader
+      - os.system() / subprocess with shell=True
+      - Hardcoded secrets (API keys, passwords in source)
+      - Bare except clauses
+      - Debug/print statements left in production code
+    """
+    evidences: List[Evidence] = []
+    py_files = _find_python_files(repo_path)
+
+    severity_high: List[str] = []
+    severity_medium: List[str] = []
+    severity_low: List[str] = []
+
+    # Regex patterns for hardcoded secrets
+    import re
+
+    secret_patterns = [
+        (r'(?:api_key|apikey|secret|password|token)\s*=\s*["\'][^"\']{8,}["\']', "Hardcoded secret"),
+        (r'sk-[a-zA-Z0-9]{20,}', "OpenAI API key"),
+        (r'ghp_[a-zA-Z0-9]{36}', "GitHub personal access token"),
+        (r'hf_[a-zA-Z0-9]{20,}', "HuggingFace token"),
+    ]
+
+    for fpath in py_files:
+        tree = _parse_file_ast(fpath)
+        if tree is None:
+            continue
+
+        source = fpath.read_text(encoding="utf-8", errors="replace")
+        rel_path = str(fpath.relative_to(repo_path)).replace("\\", "/")
+
+        # Skip test files for some checks
+        is_test = "test" in rel_path.lower()
+
+        for node in ast.walk(tree):
+            # eval / exec / compile
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in ("eval", "exec", "compile"):
+                    loc = f"{rel_path}:{node.lineno}"
+                    severity_high.append(f"{loc} — {node.func.id}() call")
+
+            # os.system
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "system" and isinstance(
+                    node.func.value, ast.Name
+                ):
+                    if node.func.value.id == "os":
+                        loc = f"{rel_path}:{node.lineno}"
+                        severity_high.append(f"{loc} — os.system() call")
+
+                # subprocess with shell=True
+                if node.func.attr in ("run", "call", "Popen", "check_output"):
+                    for kw in node.keywords:
+                        if kw.arg == "shell" and isinstance(kw.value, ast.Constant):
+                            if kw.value.value is True:
+                                loc = f"{rel_path}:{node.lineno}"
+                                severity_high.append(
+                                    f"{loc} — subprocess with shell=True"
+                                )
+
+                # pickle.load / yaml.load
+                if node.func.attr == "load":
+                    if isinstance(node.func.value, ast.Name):
+                        if node.func.value.id == "pickle":
+                            loc = f"{rel_path}:{node.lineno}"
+                            severity_medium.append(f"{loc} — pickle.load()")
+                        elif node.func.value.id == "yaml":
+                            # Check for SafeLoader
+                            has_safe_loader = any(
+                                kw.arg == "Loader"
+                                for kw in node.keywords
+                            )
+                            if not has_safe_loader:
+                                loc = f"{rel_path}:{node.lineno}"
+                                severity_medium.append(
+                                    f"{loc} — yaml.load() without SafeLoader"
+                                )
+
+            # Bare except
+            if isinstance(node, ast.ExceptHandler) and node.type is None:
+                loc = f"{rel_path}:{node.lineno}"
+                severity_low.append(f"{loc} — bare except clause")
+
+        # Hardcoded secrets check (regex on source text)
+        if not is_test and ".env" not in rel_path:
+            for pattern, desc in secret_patterns:
+                for match in re.finditer(pattern, source, re.IGNORECASE):
+                    # Skip if it's in a comment or env var lookup
+                    line_start = source.rfind("\n", 0, match.start()) + 1
+                    line = source[line_start : source.find("\n", match.end())]
+                    if "os.environ" not in line and "getenv" not in line and not line.strip().startswith("#"):
+                        loc = f"{rel_path}:{source[:match.start()].count(chr(10)) + 1}"
+                        severity_medium.append(f"{loc} — Possible {desc}")
+
+    total_findings = len(severity_high) + len(severity_medium) + len(severity_low)
+
+    summary_parts = [
+        f"Files scanned: {len(py_files)}",
+        f"Total security findings: {total_findings}",
+        f"  HIGH severity: {len(severity_high)}",
+        f"  MEDIUM severity: {len(severity_medium)}",
+        f"  LOW severity: {len(severity_low)}",
+    ]
+
+    if severity_high:
+        summary_parts.append("\n## HIGH Severity")
+        summary_parts.extend(f"- {f}" for f in severity_high[:10])
+    if severity_medium:
+        summary_parts.append("\n## MEDIUM Severity")
+        summary_parts.extend(f"- {f}" for f in severity_medium[:10])
+    if severity_low:
+        summary_parts.append("\n## LOW Severity")
+        summary_parts.extend(f"- {f}" for f in severity_low[:10])
+
+    is_clean = len(severity_high) == 0
+
+    evidences.append(
+        Evidence(
+            dimension_id="safe_tool_engineering",
+            goal="Security anti-pattern scan: eval, exec, shell injection, hardcoded secrets",
+            found=is_clean,
+            content="\n".join(summary_parts),
+            location="Repository-wide",
+            rationale=(
+                f"Security scan: {total_findings} finding(s). "
+                + (
+                    "No high-severity security issues found."
+                    if is_clean
+                    else f"{len(severity_high)} HIGH severity issue(s) detected — "
+                    "requires immediate attention."
+                )
+                + f" {len(severity_low)} low-severity issues (bare excepts)."
+            ),
+            confidence=0.9,
+        )
+    )
+
+    return evidences
 
 
 def check_file_exists(repo_path: Path, file_path: str) -> bool:

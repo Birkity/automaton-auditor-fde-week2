@@ -29,7 +29,7 @@ load_dotenv()
 
 from src.nodes.detectives import doc_analyst, repo_investigator, vision_inspector
 from src.nodes.judges import defense, prosecutor, tech_lead
-from src.nodes.chief_justice import chief_justice as chief_justice_node
+from src.nodes.justice import chief_justice as chief_justice_node
 from src.state import AgentState, AuditReport, CriterionResult, Evidence, RubricDimension
 
 
@@ -71,9 +71,93 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
 
     All detective outputs have already been merged into
     state['evidences'] via the operator.ior reducer.
-    This node validates completeness and logs summary stats.
+    This node validates completeness, logs summary stats,
+    and post-processes report_accuracy with the actual repo file list
+    (which was unavailable during parallel doc_analyst execution).
     """
     evidences = state.get("evidences", {})
+
+    # ── Post-process: fix report_accuracy cross-reference ───────────
+    # During parallel fan-out, doc_analyst cannot see repo_investigator's
+    # file list.  Now that both have merged, re-do the cross-reference.
+    meta_evs = evidences.get("_repo_file_list", [])
+    accuracy_evs = evidences.get("report_accuracy", [])
+    if meta_evs and accuracy_evs:
+        repo_files_raw = meta_evs[0].content or ""
+        repo_files = [f for f in repo_files_raw.split("\n") if f.strip()]
+        repo_files_normalized = {
+            f.lower().replace("\\", "/") for f in repo_files
+        }
+
+        updated_accuracy: List[Evidence] = []
+        for ev in accuracy_evs:
+            # Only re-check the cross-reference evidence
+            if ev.goal and "cross-reference" in ev.goal.lower():
+                # Re-extract claimed paths from the content
+                import re as _re
+
+                claimed: List[str] = []
+                # Parse the hallucinated paths from existing content
+                hall_match = _re.search(
+                    r"Hallucinated paths \(\d+\): \[([^\]]*)\]", ev.content or ""
+                )
+                ver_match = _re.search(
+                    r"Verified paths \(\d+\): \[([^\]]*)\]", ev.content or ""
+                )
+                for match in [hall_match, ver_match]:
+                    if match and match.group(1):
+                        for p in match.group(1).split(","):
+                            p = p.strip().strip("'\"")
+                            if p:
+                                claimed.append(p)
+
+                if claimed and repo_files_normalized:
+                    verified: List[str] = []
+                    hallucinated: List[str] = []
+                    for path in claimed:
+                        p_lower = path.lower().replace("\\", "/")
+                        if p_lower in repo_files_normalized:
+                            verified.append(path)
+                        elif any(
+                            rf.startswith(p_lower.rstrip("/"))
+                            for rf in repo_files_normalized
+                        ):
+                            verified.append(path)
+                        else:
+                            hallucinated.append(path)
+
+                    updated_ev = Evidence(
+                        dimension_id="report_accuracy",
+                        goal=ev.goal,
+                        found=len(hallucinated) == 0,
+                        content=(
+                            f"Verified paths ({len(verified)}): {verified}\n"
+                            f"Hallucinated paths ({len(hallucinated)}): {hallucinated}"
+                        ),
+                        location="PDF report cross-referenced with repo (post-merge)",
+                        rationale=(
+                            f"Found {len(claimed)} file path(s) in the report. "
+                            f"{len(verified)} verified, {len(hallucinated)} hallucinated."
+                            + (
+                                " All claimed paths exist in the repo."
+                                if len(hallucinated) == 0
+                                else f" HALLUCINATION DETECTED: {hallucinated}"
+                            )
+                        ),
+                        confidence=0.90,
+                    )
+                    updated_accuracy.append(updated_ev)
+                    print(
+                        f"[EvidenceAggregator] Re-verified report paths: "
+                        f"{len(verified)} verified, {len(hallucinated)} hallucinated"
+                    )
+                else:
+                    updated_accuracy.append(ev)
+            else:
+                updated_accuracy.append(ev)
+
+        evidences = {**evidences, "report_accuracy": updated_accuracy}
+
     # Count evidence per dimension (excluding meta keys)
     summary = {
         dim_id: len(evs)
@@ -85,8 +169,8 @@ def evidence_aggregator(state: AgentState) -> Dict[str, Any]:
     for dim_id, count in summary.items():
         print(f"  {dim_id}: {count} evidence(s)")
 
-    # No state mutation needed — reducers already merged everything.
-    return {}
+    # Return updated evidence (will be merged via operator.ior)
+    return {"evidences": evidences}
 
 
 # ── Conditional routing functions ───────────────────────────────────

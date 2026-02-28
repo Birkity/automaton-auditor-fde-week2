@@ -121,7 +121,7 @@ def ingest_pdf(pdf_path: str | Path, chunk_size: int = 1000) -> IngestedDocument
                 )
                 chunk_index += 1
 
-        # Extract images
+        # Extract raster images (embedded PNGs, JPGs, etc.)
         image_list = page.get_images(full=True)
         for img_idx, img in enumerate(image_list):
             xref = img[0]
@@ -130,6 +130,17 @@ def ingest_pdf(pdf_path: str | Path, chunk_size: int = 1000) -> IngestedDocument
                 image_bytes = base_image["image"]
                 image_ext = base_image["ext"]
                 result.images.append((page_num + 1, image_bytes, image_ext))
+            except Exception:
+                pass
+
+        # Rasterize pages with many vector drawings (likely diagrams).
+        # PyMuPDF's get_images() misses vector graphics — this catches them.
+        drawings = page.get_drawings()
+        if len(drawings) >= 20 and len(image_list) == 0:
+            try:
+                # Render at 2x resolution for clarity
+                pix = page.get_pixmap(dpi=200)
+                result.images.append((page_num + 1, pix.tobytes("png"), "png"))
             except Exception:
                 pass
 

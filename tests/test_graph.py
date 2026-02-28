@@ -91,8 +91,8 @@ class TestContextBuilder:
 
 
 class TestEvidenceAggregator:
-    def test_returns_empty_dict_always(self):
-        """evidence_aggregator is a pass-through — no mutations."""
+    def test_returns_evidence_dict(self):
+        """evidence_aggregator returns full evidence dict (may include post-processed cross-refs)."""
         state = {
             "repo_url": "https://github.com/test/repo",
             "pdf_path": "",
@@ -102,7 +102,9 @@ class TestEvidenceAggregator:
             "final_report": None,
         }
         result = evidence_aggregator(state)
-        assert result == {}
+        assert "evidences" in result
+        assert "dim1" in result["evidences"]
+        assert "dim2" in result["evidences"]
 
     def test_handles_empty_evidences(self):
         state = {
@@ -114,7 +116,7 @@ class TestEvidenceAggregator:
             "final_report": None,
         }
         result = evidence_aggregator(state)
-        assert result == {}
+        assert result == {"evidences": {}}
 
 
 # ── Tests: graph topology ───────────────────────────────────────────
