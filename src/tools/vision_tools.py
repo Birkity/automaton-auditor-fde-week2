@@ -33,6 +33,13 @@ VISION_HF_MODEL = os.environ.get(
 
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
+# OpenAI-compatible endpoint (vLLM, Together AI, Nebius, etc.)
+# Set VISION_OPENAI_BASE_URL to use this strategy (tried first).
+# e.g. http://localhost:8000/v1  (local vLLM)
+#      https://api.together.xyz/v1  (Together AI)
+VISION_OPENAI_BASE_URL = os.environ.get("VISION_OPENAI_BASE_URL", None)
+VISION_API_KEY = os.environ.get("VISION_API_KEY", HF_TOKEN or "EMPTY")
+
 # Prompt for diagram classification
 DIAGRAM_CLASSIFICATION_PROMPT = (
     "You are a software architecture expert. Analyze this image from a "
@@ -101,6 +108,74 @@ def _load_vision_model() -> tuple:
         _model = None
 
     return _processor, _model
+
+
+# ── Strategy 0: OpenAI-compatible API (vLLM / Together / Nebius) ───
+
+
+def _invoke_vision_openai_compat(image_bytes: bytes, ext: str) -> dict | None:
+    """Classify an image via any OpenAI-compatible chat completions endpoint.
+
+    Works with:
+      - Local vLLM:  VISION_OPENAI_BASE_URL=http://localhost:8000/v1
+      - Together AI: VISION_OPENAI_BASE_URL=https://api.together.xyz/v1
+      - Nebius:      VISION_OPENAI_BASE_URL=https://api.studio.nebius.com/v1
+    Requires VISION_OPENAI_BASE_URL to be set in the environment.
+
+    Returns parsed JSON dict on success, None on failure.
+    """
+    if not VISION_OPENAI_BASE_URL:
+        return None
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("[VisionInspector] openai package not installed — run: pip install openai")
+        return None
+
+    try:
+        mime = _EXT_MIME.get(ext.lower().lstrip("."), "image/png")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_url = f"data:{mime};base64,{b64}"
+
+        client = OpenAI(
+            base_url=VISION_OPENAI_BASE_URL,
+            api_key=VISION_API_KEY,
+        )
+
+        completion = client.chat.completions.create(
+            model=VISION_HF_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": DIAGRAM_CLASSIFICATION_PROMPT},
+                    ],
+                }
+            ],
+            max_tokens=512,
+        )
+
+        response_text = completion.choices[0].message.content
+
+        clean = response_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            clean = clean.strip()
+
+        parsed = json.loads(clean)
+        print(
+            f"[VisionInspector] OpenAI-compat API success "
+            f"({VISION_OPENAI_BASE_URL}) — type={parsed.get('type')}"
+        )
+        return parsed
+
+    except Exception as e:
+        print(f"[VisionInspector] OpenAI-compat API failed: {e}")
+        return None
 
 
 # ── Strategy 1: HuggingFace Inference API (cloud) ──────────────────
@@ -229,14 +304,20 @@ def _invoke_vision_local(image_bytes: bytes, ext: str) -> dict | None:
 
 
 def _invoke_vision_llm(image_bytes: bytes, ext: str) -> dict | None:
-    """Classify an image using Qwen2.5-VL via HuggingFace.
+    """Classify an image using Qwen2.5-VL.
 
     Strategy (ordered by preference):
-      1. HuggingFace Inference API (cloud, needs HF_TOKEN).
+      0. OpenAI-compatible API (vLLM/Together/Nebius — needs VISION_OPENAI_BASE_URL).
+      1. HuggingFace Inference API (cloud, needs HF_TOKEN and model to be hosted).
       2. Local HuggingFace model (needs ~64 GB VRAM).
       3. Return None — caller uses metadata-only evidence.
     """
-    # Strategy 1: HF cloud API
+    # Strategy 0: OpenAI-compatible endpoint (vLLM, Together, Nebius, …)
+    result = _invoke_vision_openai_compat(image_bytes, ext)
+    if result is not None:
+        return result
+
+    # Strategy 1: HF cloud API (only works if model is hosted on HF inference)
     result = _invoke_vision_api(image_bytes, ext)
     if result is not None:
         return result
